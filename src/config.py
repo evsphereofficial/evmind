@@ -87,6 +87,12 @@ class MetaConfig:
     lambda_delta: float = 0.5   # weight of mean relative |dW| (change cost)
     second_order: bool = False  # short-horizon FOMAML is valid & stable here
     eval_pairs: int = 24        # paired gated-vs-ungated sanity check pairs
+    old_tasks_max: int = 2      # persistent old-knowledge memory depth:
+                                # 0..N prior tasks installed per meta step,
+                                # each captured into a SensitivityMemory
+    memory_agg: str = "ewc"     # importance aggregation across old tasks:
+                                # ewc=mean g^2 (Fisher), max=|g| running max,
+                                # recency=recency-weighted mean, ema=EMA
 
 
 @dataclass

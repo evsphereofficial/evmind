@@ -41,6 +41,73 @@ class ParamGroup:
         return self.param.numel()
 
 
+class SensitivityMemory:
+    """Persistent per-weight OLD-KNOWLEDGE sensitivity accumulator.
+
+    After each old task is trained, the caller captures that task's
+    sensitivity gradient g_t (grad of its loss w.r.t. the current params,
+    one fixed eval batch) and calls update(). The memory aggregates ALL
+    captured sensitivities into:
+
+      imp[i]: per-weight IMPORTANCE (nonneg): "how costly would changing
+              this weight be to everything learned so far?" (accumulated
+              EWC/Fisher-style diagonal; not just the last task)
+      dir[i]: signed task-pull direction (running mean of normalized g_t),
+              enabling cos(g_mem, g_new) conflict features
+
+    Aggregation choices are TESTED, not assumed (config meta.memory_agg):
+      "ewc":     running mean of per-task normalized g^2 (classic Fisher)
+      "max":     running max of |g_hat| -> protect if ANY old task depends
+      "recency": recency-weighted mean of g^2 (recent tasks count more)
+      "ema":     exponential moving average of g^2 (persistent compact)
+    Direction is always a running mean of signed normalized g.
+    """
+
+    def __init__(
+        self,
+        groups: list[ParamGroup],
+        agg: str = "ewc",
+        beta: float = 0.9,
+        device: torch.device | None = None,
+    ) -> None:
+        self.agg = agg
+        self.beta = beta
+        self.imp = [torch.zeros(g.size, device=device) for g in groups]
+        self.dir = [torch.zeros(g.size, device=device) for g in groups]
+        self.n = 0
+        self._wsum = 0.0
+
+    @torch.no_grad()
+    def update(self, g_list: list[torch.Tensor]) -> None:
+        """Accumulate one old task's sensitivity gradient."""
+        self.n += 1
+        self._wsum += self.n
+        for i, g in enumerate(g_list):
+            gf = g.detach().flatten()
+            gh = gf / (gf.abs().mean() + 1e-12)
+            g2 = gh * gh
+            if self.agg == "ewc":
+                self.imp[i] = (self.imp[i] * (self.n - 1) + g2) / self.n
+            elif self.agg == "max":
+                self.imp[i] = torch.maximum(self.imp[i], g2)
+            elif self.agg == "ema":
+                self.imp[i] = (self.beta * self.imp[i]
+                               + (1 - self.beta) * g2)
+            elif self.agg == "recency":
+                self.imp[i] = (self.imp[i] * (self._wsum - self.n)
+                               + self.n * g2) / self._wsum
+            self.dir[i] = (self.dir[i] * (self.n - 1) + gh) / self.n
+
+    def is_empty(self) -> bool:
+        return self.n == 0
+
+    def importance(self) -> list[torch.Tensor]:
+        return list(self.imp)
+
+    def direction(self) -> list[torch.Tensor]:
+        return list(self.dir)
+
+
 def build_module_groups(model: nn.Module) -> list[ParamGroup]:
     """One control group per leaf parameter tensor."""
     groups = []
@@ -97,8 +164,9 @@ class HRMIntentGovernor(nn.Module):
         refine_steps: int = 2,
         init_mask: float = 0.5,
         global_feat_dim: int = 9,
-        per_weight_feat_dim: int = 7,
-        # log1p|gB|, log1p|W|, log1p|gA|, cos(gA,gB), sign(gA.gB)log1p|gA.gB|,
+        per_weight_feat_dim: int = 8,
+        # log1p|gB|, log1p|W|, log1p(I_mem), cos(g_mem,gB),
+        # sign(g_mem.gB)log1p|g_mem.gB|, log1p|gA_imm|,
         # rel-change history, position (onehot+ctx appended)
     ) -> None:
         super().__init__()
@@ -109,8 +177,9 @@ class HRMIntentGovernor(nn.Module):
 
         # input width: plus 1 for the recursive refinement channel (prev mean gate)
         w_in = per_weight_feat_dim + num_groups + global_feat_dim + 1
-        # module: group stats + context
-        m_in = 5 + global_feat_dim + 1
+        # module: group stats (|g|,|p|,|gp|,log1p|g|,log1p g^2,log1p I_mem,
+        # log1p|g_mem.gB|) + context
+        m_in = 7 + global_feat_dim + 1
         in_dim = w_in if granularity == "weight" else m_in
 
         self.mlp = nn.Sequential(
@@ -133,20 +202,25 @@ class HRMIntentGovernor(nn.Module):
         global_feats: torch.Tensor,
         g_old_list: list[torch.Tensor] | None = None,
         hist_list: list[torch.Tensor] | None = None,
+        mem_imp_list: list[torch.Tensor] | None = None,
+        mem_dir_list: list[torch.Tensor] | None = None,
     ) -> list[torch.Tensor]:
         """Return one gate tensor per group, shapes matching p_list.
 
-        Per-weight gradient RELATIONSHIP features (the heart of selective
-        plasticity):
-            cos(gA, gB): aligned (+1) -> updating helps both -> open;
-                         conflicting (-1) -> updating harms old -> close
-            gA, gB magnitudes: gB strong + gA weak = free capacity -> open
-            sign(gA.gB)*log1p|gA.gB|: raw conflict magnitude
-            rel-change history: |p - p0|/|p0| so far (already-touched weights)
-        g_old_list: per-weight gradient of OLD-task loss w.r.t. params before
-        the burst (task-A sensitivity / EWC diagonal).
-
-        Fully vectorized over all controlled weights (single MLP pass).
+        Per-weight plasticity features (what the gate-MLP sees):
+            I_mem (accumulated old-task importance): large -> changing
+                  this weight is costly to the whole retained body of
+                  knowledge (EWC/Fisher diagonal, persistent memory)
+            g_mem = signed memory direction: cos(g_mem,gB) aligned ->
+                  updating helps old memory; conflicting -> harms it
+            sign(g_mem.gB)*log1p|g_mem.gB|: raw conflict magnitude
+            gA_imm (immediate old-task gradient): most recent task's
+                  sensitivity — kept alongside the accumulated memory
+            gB magnitude, |W|, rel-change history, position
+        g_old_list: per-weight gradient of the most recent OLD-task loss
+        (immediate-task signal).
+        mem_imp_list/mem_dir_list: accumulated importance + direction
+        across ALL prior tasks (persistent old-knowledge representation).
         """
         sizes = [p.numel() for p in p_list]
         G = len(sizes)
@@ -162,6 +236,14 @@ class HRMIntentGovernor(nn.Module):
             hist_all = torch.zeros_like(g_all)
         else:
             hist_all = torch.cat([h.detach().flatten() for h in hist_list])
+        if mem_imp_list is None:
+            mem_imp_all = torch.zeros_like(g_all)
+        else:
+            mem_imp_all = torch.cat([v.detach().flatten() for v in mem_imp_list])
+        if mem_dir_list is None:
+            mem_dir_all = torch.zeros_like(g_all)
+        else:
+            mem_dir_all = torch.cat([v.detach().flatten() for v in mem_dir_list])
 
         gids = torch.repeat_interleave(torch.arange(G, device=p_all.device),
                                        torch.tensor(sizes, device=p_all.device))
@@ -172,15 +254,16 @@ class HRMIntentGovernor(nn.Module):
         if self.granularity == "weight":
             onehot = torch.nn.functional.one_hot(gids, num_classes=G).float()
             ctx = global_feats.unsqueeze(0).expand(N, -1)
-            denom = g_all.abs() * g_old_all.abs() + eps
-            cos_align = (g_all * g_old_all) / denom        # [-1, 1]
-            raw_dot = g_all * g_old_all
+            denom = g_all.abs() * mem_dir_all.abs() + eps
+            cos_mem = (g_all * mem_dir_all) / denom        # [-1, 1]
+            raw_dot = g_all * mem_dir_all
             feats = torch.cat([
                 torch.log1p(g_all.abs() + eps).unsqueeze(-1),
                 torch.log1p(p_all.abs() + eps).unsqueeze(-1),
-                torch.log1p(g_old_all.abs() + eps).unsqueeze(-1),
-                cos_align.unsqueeze(-1),
+                torch.log1p(mem_imp_all.abs() + eps).unsqueeze(-1),
+                cos_mem.unsqueeze(-1),
                 (raw_dot.sign() * torch.log1p(raw_dot.abs() + eps)).unsqueeze(-1),
+                torch.log1p(g_old_all.abs() + eps).unsqueeze(-1),
                 torch.log1p(hist_all + eps).unsqueeze(-1),
                 idx_frac.unsqueeze(-1),
                 onehot,
@@ -198,12 +281,18 @@ class HRMIntentGovernor(nn.Module):
             abgp.scatter_add_(0, gids, (g_all * p_all).abs())
             gsq = torch.zeros(G, device=p_all.device)
             gsq.scatter_add_(0, gids, g_all ** 2)
+            memsq = torch.zeros(G, device=p_all.device)
+            memsq.scatter_add_(0, gids, mem_imp_all)
+            memdirg = torch.zeros(G, device=p_all.device)
+            memdirg.scatter_add_(0, gids, (mem_dir_all * g_all).abs())
             feats = torch.cat([
                 (absg / counts).unsqueeze(-1),
                 (absp / counts).unsqueeze(-1),
                 (abgp / counts).unsqueeze(-1),
                 torch.log1p(absg / counts).unsqueeze(-1),
                 torch.log1p(gsq / counts).unsqueeze(-1),
+                torch.log1p(memsq / counts).unsqueeze(-1),
+                torch.log1p(memdirg / counts).unsqueeze(-1),
                 global_feats.unsqueeze(0).expand(G, -1),
             ], dim=-1)
 
@@ -230,6 +319,8 @@ class HRMIntentGovernor(nn.Module):
         device: torch.device,
         g_old_list: list[torch.Tensor] | None = None,
         hist_list: list[torch.Tensor] | None = None,
+        mem_imp_list: list[torch.Tensor] | None = None,
+        mem_dir_list: list[torch.Tensor] | None = None,
     ) -> list[torch.Tensor]:
         """Gate tensors computed from a live model's params + .grad."""
         p_list = [g.param.detach().flatten() for g in groups]
@@ -237,7 +328,8 @@ class HRMIntentGovernor(nn.Module):
         global_feats = compute_global_features(
             x, y, loss,
             torch.cat(g_list), torch.cat(p_list), device)
-        return self.gate(p_list, g_list, global_feats, g_old_list, hist_list)
+        return self.gate(p_list, g_list, global_feats, g_old_list, hist_list,
+                         mem_imp_list, mem_dir_list)
 
     def gate_from_state(
         self,
@@ -251,6 +343,8 @@ class HRMIntentGovernor(nn.Module):
         differentiable: bool = True,
         g_old_list: list[torch.Tensor] | None = None,
         hist_list: list[torch.Tensor] | None = None,
+        mem_imp_list: list[torch.Tensor] | None = None,
+        mem_dir_list: list[torch.Tensor] | None = None,
     ) -> list[torch.Tensor]:
         """Gate tensors from a functional parameter dict (meta-training path)."""
         p_list = [p_cur[g.name].detach().flatten() for g in groups]
@@ -258,9 +352,11 @@ class HRMIntentGovernor(nn.Module):
         global_feats = compute_global_features(
             x, y, loss, torch.cat(g_flat), torch.cat(p_list), device)
         if differentiable:
-            return self.gate(p_list, g_flat, global_feats, g_old_list, hist_list)
+            return self.gate(p_list, g_flat, global_feats, g_old_list,
+                             hist_list, mem_imp_list, mem_dir_list)
         with torch.no_grad():
-            return self.gate(p_list, g_flat, global_feats, g_old_list, hist_list)
+            return self.gate(p_list, g_flat, global_feats, g_old_list,
+                             hist_list, mem_imp_list, mem_dir_list)
 
     def total_masks(self, groups: list[ParamGroup]) -> int:
         return sum(g.size for g in groups)
@@ -311,6 +407,8 @@ class DirectGateGovernor(nn.Module):
         differentiable: bool = True,
         g_old_list=None,
         hist_list=None,
+        mem_imp_list=None,
+        mem_dir_list=None,
     ) -> list[torch.Tensor]:
         """Same interface as HRMIntentGovernor; state inputs are ignored."""
         return self._masks(differentiable)
@@ -325,6 +423,8 @@ class DirectGateGovernor(nn.Module):
         device=None,
         g_old_list=None,
         hist_list=None,
+        mem_imp_list=None,
+        mem_dir_list=None,
     ) -> list[torch.Tensor]:
         return self._masks(differentiable=False)
 
@@ -365,13 +465,16 @@ class HRMController:
         loss: torch.Tensor,
         g_old_list: list[torch.Tensor] | None = None,
         snapshot: dict[str, torch.Tensor] | None = None,
+        memory: SensitivityMemory | None = None,
     ) -> list[torch.Tensor]:
         """Read-only gate computation (does NOT touch .grad).
 
-        g_old_list: gradients of ALL previous tasks' losses w.r.t. current
-        params -> the "impact of changing this weight on old knowledge"
-        signal, same semantics as meta-training. snapshot: phase-start
-        params -> rel-change history.
+        g_old_list: gradient of the most recent old-task loss w.r.t. current
+        params (immediate-task signal, same semantics as meta-training).
+        memory: persistent accumulated importance + direction over ALL prior
+        tasks (SensitivityMemory) -> "how costly is changing this weight to
+        everything learned so far?". snapshot: phase-start params ->
+        rel-change history.
         """
         hist_list = None
         if snapshot is not None:
@@ -381,9 +484,13 @@ class HRMController:
                 / (snapshot[g.name].abs() + eps)
                 for g in self.groups if g.name in snapshot
             ]
+        mem_imp = mem_dir = None
+        if memory is not None and not memory.is_empty():
+            mem_imp = memory.importance()
+            mem_dir = memory.direction()
         return self.governor.gate_from_model(
             model, self.groups, x, y, loss, self.device,
-            g_old_list, hist_list)
+            g_old_list, hist_list, mem_imp, mem_dir)
 
     @torch.no_grad()
     def scale_update(

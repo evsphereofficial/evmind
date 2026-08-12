@@ -31,7 +31,7 @@ from .evaluate import evaluate
 from .experiment import make_optimizer, plot_accuracy_matrix, set_seed
 from .hrm import (
     build_module_groups, DirectGateGovernor, HRMController,
-    HRMIntentGovernor, mask_stats,
+    HRMIntentGovernor, mask_stats, SensitivityMemory,
     measure_rel_change, measure_update_fraction,
 )
 from .metrics import compute_forgetting
@@ -44,36 +44,33 @@ DEFAULT_GOVERNOR = str(PROJECT_ROOT / "results_governor" / "governor_pretrained.
 DEFAULT_BASELINE_CSV = str(PROJECT_ROOT / "results" / "task_accuracies.csv")
 
 
-def old_task_grads(
+def capture_sensitivity(
     model: torch.nn.Module,
     groups,
     datasets: dict,
     loss_fn: torch.nn.Module,
     device: torch.device,
-    phase: int,
-) -> list[torch.Tensor] | None:
-    """Accumulated gradients of ALL previous tasks' losses on the current
-    params = per-weight impact signal sent to the frozen governor (gA in
-    meta-training terms). One fixed 512-sample batch per prior task."""
-    if phase == 0:
-        return None
+    task_idx: int,
+) -> list[torch.Tensor]:
+    """Per-weight sensitivity of ONE old task on the CURRENT params
+    (grad of its loss, one fixed 512-sample batch). Called AFTER that
+    task's phase finishes -> the per-task capture that accumulates into
+    the persistent SensitivityMemory (g_A, g_B, g_C, ... pattern)."""
+    cached = datasets.get((task_idx, "test_grad"))
+    if cached is None:
+        task_ds = datasets[(task_idx, "test")]
+        gen = torch.Generator().manual_seed(10_000 + task_idx)
+        idx = torch.randperm(len(task_ds), generator=gen)[:512]
+        xs = torch.stack([task_ds[j][0] for j in idx]).to(device)
+        ys = torch.stack([task_ds[j][1] for j in idx]).to(device)
+        datasets[(task_idx, "test_grad")] = (xs, ys)
+    else:
+        xs, ys = cached
     model.zero_grad(set_to_none=True)
-    for i in range(phase):
-        cached = datasets.get((i, "test_grad"))
-        if cached is None:
-            task_ds = datasets[(i, "test")]
-            gen = torch.Generator().manual_seed(10_000 + i)
-            idx = torch.randperm(len(task_ds), generator=gen)[:512]
-            xs = torch.stack([task_ds[j][0] for j in idx]).to(device)
-            ys = torch.stack([task_ds[j][1] for j in idx]).to(device)
-            datasets[(i, "test_grad")] = (xs, ys)
-        else:
-            xs, ys = cached
-        loss = loss_fn(model(xs), ys)
-        loss.backward()  # accumulate into .grad
-    g_old = [g.param.grad.detach().clone() for g in groups]
+    loss = loss_fn(model(xs), ys)
+    g_t = [g.param.grad.detach().clone() for g in groups]
     model.zero_grad(set_to_none=True)
-    return g_old
+    return g_t
 
 
 def train_one_epoch_gated(
@@ -87,6 +84,7 @@ def train_one_epoch_gated(
     phase: int,
     g_old_list: list[torch.Tensor] | None,
     snapshot: dict[str, torch.Tensor],
+    memory: SensitivityMemory | None = None,
 ) -> tuple[float, float, float]:
     """One epoch with governor-gated gradient updates (§17 control_update)."""
     model.train()
@@ -103,9 +101,11 @@ def train_one_epoch_gated(
 
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
-        # read-only gates from the governor (sees raw gB in .grad)
+        # read-only gates from the governor (sees raw gB in .grad;
+        # gA = immediate old-task gradient, memory = accumulated body)
         masks = controller.compute_masks(
-            model, x, y, loss, g_old_list=g_old_list, snapshot=snapshot)
+            model, x, y, loss, g_old_list=g_old_list, snapshot=snapshot,
+            memory=memory)
         pre = {g.name: g.param.detach().clone()
                for g in controller.groups}
         optimizer.step()
@@ -172,11 +172,17 @@ def main() -> None:
     parser.add_argument("--mode", choices=["mlp", "direct"], default="mlp",
                         help="mlp = shared gate network (phase 2); "
                              "direct = frozen one-gate-per-weight (phase 2b)")
+    parser.add_argument("--memory-agg",
+                        choices=["ewc", "max", "recency", "ema"], default=None,
+                        help="old-knowledge importance aggregation "
+                             "(default: from meta config)")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
     if args.seed is not None:
         cfg.train.seed = args.seed
+    if args.memory_agg is not None:
+        cfg.meta.memory_agg = args.memory_agg
     outdir = Path(args.outdir)
     outdir.mkdir(parents=True, exist_ok=True)
     for f in outdir.iterdir():
@@ -252,6 +258,15 @@ def main() -> None:
         torch.cuda.reset_peak_memory_stats()
         torch.cuda.empty_cache()
 
+    # persistent old-knowledge memory: captures each task's sensitivity
+    # when its phase FINISHES (g_A, g_B, g_C, ...), aggregated so the
+    # governor gates against the whole accumulated body, not just the
+    # most recent task. Same aggregation as meta-training.
+    memory = SensitivityMemory(
+        groups, agg=args.memory_agg or getattr(cfg.meta, "memory_agg", "ewc"),
+        device=device)
+    g_old_imm = None  # immediate old-task gradient (most recent capture)
+
     for phase, task in enumerate(tasks):
         task_name = task.name
         train_loader = torch.utils.data.DataLoader(
@@ -260,13 +275,13 @@ def main() -> None:
             num_workers=cfg.train.num_workers)
 
         snapshot = {n: p.detach().clone() for n, p in model.named_parameters()}
-        g_old_list = old_task_grads(model, groups, datasets, loss_fn, device, phase)
         train_start = time.perf_counter()
 
         for epoch in range(cfg.train.epochs_per_task):
             loss, acc, secs = train_one_epoch_gated(
                 model, train_loader, optimizer, loss_fn, device,
-                controller, mask_rows, phase + 1, g_old_list, snapshot)
+                controller, mask_rows, phase + 1, g_old_imm, snapshot,
+                memory=memory)
             log_rows.append({
                 "task": task_name, "phase": phase + 1, "epoch": epoch + 1,
                 "train_loss": round(loss, 5),
@@ -278,6 +293,15 @@ def main() -> None:
         train_times[phase] = time.perf_counter() - train_start
         update_fractions[phase] = measure_update_fraction(model, snapshot)
         rel_changes[phase] = measure_rel_change(model, snapshot)
+
+        # capture THIS task's sensitivity and accumulate into the memory:
+        # the next task will be gated against everything learned so far
+        g_t = capture_sensitivity(model, groups, datasets, loss_fn,
+                                  device, phase)
+        memory.update(g_t)
+        g_old_imm = g_t
+        print(f"  memory: {memory.n} task(s), agg={memory.agg}, "
+              f"|I_mem| mean={sum(v.abs().mean().item() for v in memory.importance()) / len(memory.importance()):.3f}")
 
         print(f"  Evaluating task(s): {', '.join(task_names[: phase + 1])}")
         for i in range(phase + 1):
@@ -323,6 +347,8 @@ def main() -> None:
         "governor_params": governor.governor_params(),
         "num_groups": len(groups),
         "granularity": getattr(governor, "granularity", args.mode),
+        "memory": {"agg": args.memory_agg or getattr(cfg.meta, "memory_agg", "ewc"),
+                   "tasks_captured": memory.n},
         "training_time_seconds": {f"task{i+1}": round(t, 3) for i, t in train_times.items()},
         "total_training_seconds": round(sum(train_times.values()), 3),
         "inference_latency_ms_per_sample": latency_ms,

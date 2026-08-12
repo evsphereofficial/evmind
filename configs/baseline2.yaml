@@ -60,6 +60,14 @@ governor:
 # Objective - parameter modification itself is expensive:
 #   L = L_new + lambda_old*L_old + lambda_sparse*mean(M) + lambda_delta*mean(|dW|/|W|)
 #   so the governor must learn selective plasticity, not "update everything".
+#
+# Persistent old-knowledge memory (Phase 2c): the governor is trained on task
+# SEQUENCES (0..old_tasks_max old tasks installed in order, each captured into
+# a SensitivityMemory) so it learns to gate against an ACCUMULATED body of
+# prior knowledge, not just the most recent task. Aggregation choices:
+#   "ewc" (running mean of per-task g^2, classic Fisher), "max" (running max,
+#   protect if ANY old task depends), "recency" (recency-weighted mean),
+#   "ema" (exponential moving average).
 meta:
   steps: 200
   meta_batch: 8
@@ -75,3 +83,5 @@ meta:
   lambda_ewc: 0.05
   lambda_delta: 0.5
   eval_pairs: 24
+  old_tasks_max: 2
+  memory_agg: ewc

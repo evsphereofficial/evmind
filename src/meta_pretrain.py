@@ -39,6 +39,7 @@ import json
 import time
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
@@ -48,6 +49,7 @@ from .config import load_config
 from .experiment import set_seed
 from .hrm import (
     build_module_groups, DirectGateGovernor, HRMIntentGovernor, mask_stats,
+    SensitivityMemory,
 )
 from .model import TinyNumericTransformer
 
@@ -140,6 +142,8 @@ def gated_burst(
     g_old: list[torch.Tensor] | None = None,
     p0: dict[str, torch.Tensor] | None = None,
     second_order: bool = False,
+    mem_imp: list[torch.Tensor] | None = None,
+    mem_dir: list[torch.Tensor] | None = None,
 ) -> tuple[dict[str, torch.Tensor], list[dict], float]:
     """Unroll `steps` governor-gated updates on `task`.
 
@@ -175,7 +179,7 @@ def gated_burst(
             masks = governor.gate_from_state(
                 p_cur, grad_list, groups, x, y, loss, device,
                 differentiable=differentiable, g_old_list=g_old,
-                hist_list=hist)
+                hist_list=hist, mem_imp_list=mem_imp, mem_dir_list=mem_dir)
 
         mask_log.append(mask_stats(masks))
         gate_means.append(torch.cat([m.flatten() for m in masks]).mean())
@@ -230,7 +234,16 @@ def meta_step(
     seed_off: int,
     rng: torch.Generator,
 ) -> dict:
-    """One meta step (warmup A -> gated burst on B -> governor objective).
+    """One meta step: task SEQUENCE -> memory -> gated burst on B.
+
+    Simulates the live stream's accumulation pattern:
+      install old task A1 -> capture g_A1 -> memory
+      install old task A2 -> capture g_A2 -> memory
+      ...
+      burst on new task B (governor-gated)
+    so the governor learns with a persistent OLD-KNOWLEDGE MEMORY input
+    (accumulated importance + direction over ALL prior tasks), not just the
+    immediate-task gradient.
 
     Returns tensors kept attached to the governor graph:
         gov_loss, loss_new, loss_old, sparse_cost, delta_cost
@@ -240,14 +253,31 @@ def meta_step(
     base_lr = m.burst_lr
     warmup_lr = getattr(m, "warmup_lr", m.lr)
     bsize = m.batch_size
+    old_tasks_max = int(getattr(m, "old_tasks_max", 0))
 
     torch.manual_seed(100_000 + seed_off * 7)
     reset_model(model)
-    fam_a = make_meta_task(rng)
+    k_old = int(torch.randint(0, old_tasks_max + 1, (1,), generator=rng)[0])
+    old_tasks = [make_meta_task(rng) for _ in range(k_old)]
     fam_b = make_meta_task(rng)
 
-    warmup_batches(model, fam_a, m.warmup_batches, bsize, warmup_lr,
-                   seed_base=seed_off * 31, device=device)
+    # sequential install + per-task sensitivity capture into the memory
+    memory = SensitivityMemory(groups, agg=getattr(m, "memory_agg", "ewc"),
+                               device=device)
+    g_old_imm = None  # immediate old-task gradient (most recent task)
+    for t_i, fam_a in enumerate(old_tasks):
+        warmup_batches(model, fam_a, m.warmup_batches, bsize, warmup_lr,
+                       seed_base=seed_off * 31 + t_i * 7, device=device)
+        model.zero_grad(set_to_none=True)
+        x_cap = _sample_batch(bsize, seed_offset=seed_off * 45 + 13 + t_i * 17).to(device)
+        y_cap = meta_task_labels(x_cap, fam_a).to(device)
+        g_t = torch.autograd.grad(
+            BCE(model(x_cap), y_cap),
+            [g.param for g in groups],
+            create_graph=False, allow_unused=False)
+        memory.update(g_t)
+        g_old_imm = [gg.detach().clone() for gg in g_t]
+
     model.zero_grad(set_to_none=True)
 
     # current params as functional leaves (no link to live model)
@@ -256,37 +286,36 @@ def meta_step(
     p0 = {g.name: t.detach().clone() for g, t in zip(groups, [p_cur[g.name]
                                                               for g in groups])}
 
-    # pre-burst OLD-task sensitivity: grad of L_A w.r.t. pre-burst params
-    # (the EWC-diagonal importance measure; per-weight feature for the
-    # governor so selective gating is directly learnable)
-    x_as = _sample_batch(bsize, seed_offset=seed_off * 45 + 13).to(device)
-    y_as = meta_task_labels(x_as, fam_a).to(device)
-    aloss = BCE(functional_call(model, p_cur, (x_as,)), y_as)
-    g_old = torch.autograd.grad(
-        aloss, [p_cur[g.name] for g in groups],
-        create_graph=False, allow_unused=False)
-
+    mem_imp = memory.importance() if k_old > 0 else None
+    mem_dir = memory.direction() if k_old > 0 else None
     p_cur, mask_log, mean_gate, mean_ewc = gated_burst(
         model, governor, groups, p_cur, fam_b,
         lr=base_lr, steps=m.burst_steps, batch_size=bsize,
         seed_base=seed_off * 37 + 5, device=device, differentiable=True,
-        g_old=g_old, p0=p0, second_order=m.second_order)
+        g_old=g_old_imm, p0=p0, second_order=m.second_order,
+        mem_imp=mem_imp, mem_dir=mem_dir)
 
-    x_av = _sample_batch(bsize, seed_offset=seed_off * 41 + 9).to(device)
-    y_av = meta_task_labels(x_av, fam_a).to(device)
     x_bv = _sample_batch(bsize, seed_offset=seed_off * 43 + 11).to(device)
     y_bv = meta_task_labels(x_bv, fam_b).to(device)
-
     loss_new = BCE(functional_call(model, p_cur, (x_bv,)), y_bv)
-    loss_old = BCE(functional_call(model, p_cur, (x_av,)), y_av)
+
+    # retention: mean loss over ALL installed old tasks (the accumulated
+    # body of knowledge), not just the most recent one
+    old_losses = []
+    for t_i, fam_a in enumerate(old_tasks):
+        x_av = _sample_batch(bsize, seed_offset=seed_off * 41 + 9 + t_i * 19).to(device)
+        y_av = meta_task_labels(x_av, fam_a).to(device)
+        old_losses.append(BCE(functional_call(model, p_cur, (x_av,)), y_av))
+    loss_old = torch.stack(old_losses).mean() if old_losses else (
+        loss_new.detach() * 0.0)
 
     # parameter-change cost: mean relative |dW|/|W_before| over all weights
-    rel_changes = []
-    for g in groups:
-        d = (p_cur[g.name] - p0[g.name]).abs()
-        rel = d / (p0[g.name].abs() + 1e-8)
-        rel_changes.append(rel.mean())
-    mean_rel_change = torch.stack(rel_changes).mean()
+    # (ratio-of-means: robust to near-zero individual weights, e.g. k_old=0
+    # starts from random init where per-weight relative changes explode)
+    dW = torch.cat([(p_cur[g.name] - p0[g.name]).abs().flatten()
+                    for g in groups])
+    p0_abs = torch.cat([p0[g.name].abs().flatten() for g in groups])
+    mean_rel_change = (dW.mean() + 1e-12) / (p0_abs.mean() + 1e-12)
 
     sparse_cost = (mean_gate - getattr(m, "sparse_target", 0.3)) ** 2
     ewc_cost = mean_ewc if mean_ewc is not None else torch.zeros((), device=device)
@@ -325,47 +354,65 @@ def meta_evaluate(
     rng: torch.Generator,
     num_pairs: int,
 ) -> tuple[pd.DataFrame, dict]:
-    """For each pair (A, B): warm up A, burst on B gated or ungated, measure."""
+    """Multi-task evaluate: install old tasks (with memory), burst on B,
+    measure retention over ALL old tasks (gated vs ungated)."""
     m = config.meta
     base_lr = m.burst_lr
     warmup_lr = getattr(m, "warmup_lr", m.lr)
     bsize = m.batch_size
+    old_tasks_max = int(getattr(m, "old_tasks_max", 1))
 
     rows = []
     for p in range(num_pairs):
         torch.manual_seed(500_000 + p * 13)
         reset_model(model)
-        fam_a = make_meta_task(rng)
+        k_old = int(torch.randint(1, old_tasks_max + 1, (1,), generator=rng)[0])
+        old_tasks = [make_meta_task(rng) for _ in range(k_old)]
         fam_b = make_meta_task(rng)
 
-        warmup_batches(model, fam_a, m.warmup_batches, bsize, warmup_lr,
-                       seed_base=p * 131, device=device)
+        memory = SensitivityMemory(
+            groups, agg=getattr(m, "memory_agg", "ewc"), device=device)
+        g_old_imm = None
+        for t_i, fam_a in enumerate(old_tasks):
+            warmup_batches(model, fam_a, m.warmup_batches, bsize, warmup_lr,
+                           seed_base=p * 131 + t_i * 7, device=device)
+            model.zero_grad(set_to_none=True)
+            x_cap = _sample_batch(bsize, seed_offset=p * 161 + t_i * 17).to(device)
+            y_cap = meta_task_labels(x_cap, fam_a).to(device)
+            g_t = torch.autograd.grad(
+                BCE(model(x_cap), y_cap), [g.param for g in groups],
+                create_graph=False, allow_unused=False)
+            memory.update(g_t)
+            g_old_imm = [gg.detach().clone() for gg in g_t]
         model.zero_grad(set_to_none=True)
 
-        xa_te = _sample_batch(512, seed_offset=p * 151).to(device)
-        ya_te = meta_task_labels(xa_te, fam_a).to(device)
+        # per-old-task eval batches (fixed)
+        tes = [(_sample_batch(512, seed_offset=p * 151 + t_i * 23).to(device),
+                meta_task_labels(_sample_batch(512, seed_offset=p * 151
+                                               + t_i * 23).to(device),
+                                 fam_a))
+               for t_i, fam_a in enumerate(old_tasks)]
         with torch.no_grad():
-            acc_a_before = (model(xa_te) > 0).float().eq(ya_te).float().mean().item()
+            acc_a_before = float(np.mean([
+                (model(xa).detach() > 0).float().eq(ya).float().mean().item()
+                for xa, ya in tes]))
 
         # ---- gated burst (frozen governor) ----
         p_g = {g.name: g.param.detach().clone().requires_grad_(True)
                for g in groups}
-        x_as = _sample_batch(bsize, seed_offset=p * 161).to(device)
-        y_as = meta_task_labels(x_as, fam_a).to(device)
-        aloss = BCE(functional_call(model, p_g, (x_as,)), y_as)
-        g_old = torch.autograd.grad(
-            aloss, [p_g[g.name] for g in groups],
-            create_graph=False, allow_unused=False)
         p0 = {g.name: t.detach().clone() for g, t in
               zip(groups, [p_g[g.name] for g in groups])}
+        mem_imp = memory.importance() if k_old > 0 else None
+        mem_dir = memory.direction() if k_old > 0 else None
         p_g, _, _, _ = gated_burst(
             model, governor, groups, p_g, fam_b,
             lr=base_lr, steps=m.burst_steps, batch_size=bsize,
             seed_base=p * 157 + 5, device=device, differentiable=False,
-            g_old=g_old, p0=p0)
+            g_old=g_old_imm, p0=p0, mem_imp=mem_imp, mem_dir=mem_dir)
         with torch.no_grad():
-            pred_a = functional_call(model, p_g, (xa_te,))
-            acc_a_gated = (pred_a > 0).float().eq(ya_te).float().mean().item()
+            acc_a_gated = float(np.mean([
+                (functional_call(model, p_g, (xa,)) > 0).float()
+                .eq(ya).float().mean().item() for xa, ya in tes]))
         xb_te = _sample_batch(512, seed_offset=p * 159).to(device)
         yb_te = meta_task_labels(xb_te, fam_b).to(device)
         with torch.no_grad():
@@ -381,13 +428,14 @@ def meta_evaluate(
             seed_base=p * 157 + 5, device=device, differentiable=False,
             ungated=True)
         with torch.no_grad():
-            pred_a = functional_call(model, p_u, (xa_te,))
-            acc_a_ungated = (pred_a > 0).float().eq(ya_te).float().mean().item()
+            acc_a_ungated = float(np.mean([
+                (functional_call(model, p_u, (xa,)) > 0).float()
+                .eq(ya).float().mean().item() for xa, ya in tes]))
             pred_b = functional_call(model, p_u, (xb_te,))
             acc_b_ungated = (pred_b > 0).float().eq(yb_te).float().mean().item()
 
         rows.append({
-            "pair": p,
+            "pair": p, "k_old": k_old,
             "acc_a_before": acc_a_before,
             "acc_a_gated": acc_a_gated,
             "acc_a_ungated": acc_a_ungated,
@@ -420,9 +468,20 @@ def main() -> None:
     parser.add_argument("--mode", choices=["mlp", "direct"], default="mlp",
                         help="mlp = shared gate network (phase 2); "
                              "direct = one trainable gate per weight (phase 2b)")
+    parser.add_argument("--old-tasks-max", type=int, default=None,
+                        help="max prior tasks installed per meta trajectory "
+                             "(persistent old-knowledge memory depth)")
+    parser.add_argument("--memory-agg", choices=["ewc", "max", "recency", "ema"],
+                        default=None,
+                        help="old-knowledge importance aggregation "
+                             "(ewc=mean g^2, max=|g| max, recency-weighted, ema)")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
+    if args.old_tasks_max is not None:
+        cfg.meta.old_tasks_max = args.old_tasks_max
+    if args.memory_agg is not None:
+        cfg.meta.memory_agg = args.memory_agg
     outdir = Path(args.outdir)
     outdir.mkdir(parents=True, exist_ok=True)
     for f in outdir.iterdir():
@@ -483,7 +542,10 @@ def main() -> None:
           f"+ {m.lambda_delta}*mean(|dW|/|W|)")
     print(f"Meta-batching: {m.meta_batch} parallel steps per governor update, "
           f"{m.steps} updates, warmup={m.warmup_batches} burst={m.burst_steps} "
-          f"batch={m.batch_size}\n")
+          f"batch={m.batch_size}")
+    print(f"Old-knowledge memory: depth 0..{getattr(m, 'old_tasks_max', 0)} tasks, "
+          f"agg='{getattr(m, 'memory_agg', 'ewc')}' "
+          f"(I_mem = accumulated per-weight importance, g_mem = direction)\n")
     reset_model(model)
 
     gov_opt = torch.optim.AdamW(governor.parameters(), lr=m.lr)
@@ -548,10 +610,12 @@ def main() -> None:
         "granularity": governor.granularity if hasattr(governor, "granularity") else "weight",
         "mode": args.mode,
         "group_names": [g.name for g in groups],
-        "objective": {"lambda_old": m.lambda_old, "lambda_sparse": m.lambda_sparse,
-                      "sparse_target": m.sparse_target,
-                      "lambda_ewc": getattr(m, "lambda_ewc", 0.0),
-                      "lambda_delta": m.lambda_delta},
+"objective": {"lambda_old": m.lambda_old, "lambda_sparse": m.lambda_sparse,
+              "sparse_target": m.sparse_target,
+              "lambda_ewc": getattr(m, "lambda_ewc", 0.0),
+              "lambda_delta": m.lambda_delta},
+        "memory": {"old_tasks_max": int(getattr(m, "old_tasks_max", 0)),
+                   "agg": getattr(m, "memory_agg", "ewc")},
         "training_seconds": round(time.perf_counter() - start, 1),
         "mask_stats_last": {k: round(v, 4) for k, v in log[-1].items()
                             if k.startswith(("mask", "frac"))}
