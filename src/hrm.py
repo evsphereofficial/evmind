@@ -108,7 +108,7 @@ class HRMIntentGovernor(nn.Module):
         self.refine_steps = refine_steps
 
         # input width: plus 1 for the recursive refinement channel (prev mean gate)
-        w_in = per_weight_feat_dim + 1 + num_groups + global_feat_dim + 1
+        w_in = per_weight_feat_dim + num_groups + global_feat_dim + 1
         # module: group stats + context
         m_in = 5 + global_feat_dim + 1
         in_dim = w_in if granularity == "weight" else m_in
@@ -228,6 +228,8 @@ class HRMIntentGovernor(nn.Module):
         y: torch.Tensor,
         loss: torch.Tensor,
         device: torch.device,
+        g_old_list: list[torch.Tensor] | None = None,
+        hist_list: list[torch.Tensor] | None = None,
     ) -> list[torch.Tensor]:
         """Gate tensors computed from a live model's params + .grad."""
         p_list = [g.param.detach().flatten() for g in groups]
@@ -235,7 +237,7 @@ class HRMIntentGovernor(nn.Module):
         global_feats = compute_global_features(
             x, y, loss,
             torch.cat(g_list), torch.cat(p_list), device)
-        return self.gate(p_list, g_list, global_feats)
+        return self.gate(p_list, g_list, global_feats, g_old_list, hist_list)
 
     def gate_from_state(
         self,
@@ -301,9 +303,27 @@ class HRMController:
         x: torch.Tensor,
         y: torch.Tensor,
         loss: torch.Tensor,
+        g_old_list: list[torch.Tensor] | None = None,
+        snapshot: dict[str, torch.Tensor] | None = None,
     ) -> list[torch.Tensor]:
-        """Gate the accumulated gradients in place; returns the masks."""
-        masks = self.governor.gate_from_model(model, self.groups, x, y, loss, self.device)
+        """Gate the accumulated gradients in place; returns the masks.
+
+        g_old_list: gradients of ALL previous tasks' losses w.r.t. current
+        params (accumulated once per phase by the caller) -> the "impact of
+        changing this weight on old knowledge" signal, same semantics as
+        meta-training. snapshot: phase-start params -> rel-change history.
+        """
+        hist_list = None
+        if snapshot is not None:
+            eps = 1e-8
+            hist_list = [
+                (g.param.detach() - snapshot[g.name]).abs()
+                / (snapshot[g.name].abs() + eps)
+                for g in self.groups if g.name in snapshot
+            ]
+        masks = self.governor.gate_from_model(
+            model, self.groups, x, y, loss, self.device,
+            g_old_list, hist_list)
         for group, m in zip(self.groups, masks):
             if group.param.grad is not None:
                 group.param.grad.mul_(m.reshape(group.param.shape))

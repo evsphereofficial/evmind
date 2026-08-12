@@ -43,6 +43,36 @@ DEFAULT_GOVERNOR = str(PROJECT_ROOT / "results_governor" / "governor_pretrained.
 DEFAULT_BASELINE_CSV = str(PROJECT_ROOT / "results" / "task_accuracies.csv")
 
 
+def old_task_grads(
+    model: torch.nn.Module,
+    groups,
+    datasets: dict,
+    loss_fn: torch.nn.Module,
+    device: torch.device,
+    phase: int,
+) -> list[torch.Tensor] | None:
+    """Accumulated gradients of ALL previous tasks' losses on the current
+    params = per-weight impact signal sent to the frozen governor (gA in
+    meta-training terms). One fixed 512-sample batch per prior task."""
+    if phase == 0:
+        return None
+    model.zero_grad(set_to_none=True)
+    for i in range(phase):
+        xs, ys = datasets.get((i, "test_grad")), None
+        if xs is None:
+            task_ds = datasets[(i, "test")]
+            gen = torch.Generator().manual_seed(10_000 + i)
+            idx = torch.randperm(len(task_ds), generator=gen)[:512]
+            xs = torch.stack([task_ds[j][0] for j in idx]).to(device)
+            ys = torch.stack([task_ds[j][1] for j in idx]).to(device)
+            datasets[(i, "test_grad")] = (xs, ys)
+        loss = loss_fn(model(xs), ys)
+        loss.backward()  # accumulate into .grad
+    g_old = [g.param.grad.detach().clone() for g in groups]
+    model.zero_grad(set_to_none=True)
+    return g_old
+
+
 def train_one_epoch_gated(
     model: torch.nn.Module,
     loader: torch.utils.data.DataLoader,
@@ -52,6 +82,8 @@ def train_one_epoch_gated(
     controller: HRMController,
     mask_rows: list[dict],
     phase: int,
+    g_old_list: list[torch.Tensor] | None,
+    snapshot: dict[str, torch.Tensor],
 ) -> tuple[float, float, float]:
     """One epoch with governor-gated gradient updates (§17 control_update)."""
     model.train()
@@ -68,7 +100,8 @@ def train_one_epoch_gated(
 
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
-        masks = controller.control_update(model, x, y, loss)   # gate gradients
+        masks = controller.control_update(
+            model, x, y, loss, g_old_list=g_old_list, snapshot=snapshot)
         optimizer.step()
 
         if step == 0 or step == len(loader) - 1:
@@ -206,12 +239,13 @@ def main() -> None:
             num_workers=cfg.train.num_workers)
 
         snapshot = {n: p.detach().clone() for n, p in model.named_parameters()}
+        g_old_list = old_task_grads(model, groups, datasets, loss_fn, device, phase)
         train_start = time.perf_counter()
 
         for epoch in range(cfg.train.epochs_per_task):
             loss, acc, secs = train_one_epoch_gated(
                 model, train_loader, optimizer, loss_fn, device,
-                controller, mask_rows, phase + 1)
+                controller, mask_rows, phase + 1, g_old_list, snapshot)
             log_rows.append({
                 "task": task_name, "phase": phase + 1, "epoch": epoch + 1,
                 "train_loss": round(loss, 5),
