@@ -1,0 +1,64 @@
+# EvMind Phase 2 — HRM-governed live learning (single node).
+# Same base model + same task protocol as Phase 1 (results/baseline.yaml),
+# plus the tiny HRM intent network that is TRAINED FIRST (src/meta_pretrain.py)
+# and then frozen during the measured continual stream (src/experiment2.py).
+
+run_name: phase2_hrm
+
+# Dataset sizes per task (identical to Phase 1 run).
+train_samples: 10000
+test_samples: 2000
+
+# The SAME five sequential tasks as Phase 1 (same boundaries, no task-ID).
+tasks:
+  - name: horizontal   # y > 0
+    type: horizontal
+  - name: vertical     # x > 0
+    type: vertical
+  - name: circle       # x^2 + y^2 > r^2
+    type: circle
+    params:
+      r: 0.55
+  - name: diagonal     # x + y > 0
+    type: diagonal
+  - name: xor_quadrant # (x > 0) != (y > 0)
+    type: xor
+
+# Base model: IDENTICAL architecture to Phase 1 (17,249 params).
+model:
+  input_dim: 2
+  seq_len: 2
+  embedding_dim: 32
+  num_layers: 2
+  num_heads: 2
+  ff_dim: 64
+  dropout: 0.0
+
+# Training protocol: identical to Phase 1 (AdamW, same lr/batch/epochs).
+train:
+  seed: 0
+  learning_rate: 0.001
+  batch_size: 128
+  epochs_per_task: 5
+  optimizer: adamw
+  weight_decay: 0.0
+  num_workers: 0
+
+# Tiny HRM intent network (learning governor) - architecture_v2.md section 132.
+governor:
+  hidden_dim: 20
+  refine_steps: 2
+  init_mask: 0.9
+  granularity: module
+
+# First stage: meta-pretrain the intent network (trained on the same geometry
+# families with randomized boundary shifts; disclosed in MASTER.md), so that
+# it can decide retention before the measured continual stream begins.
+meta:
+  steps: 2500
+  batch_size: 256
+  warmup_batches: 5
+  lr: 0.001
+  beta_old: 1.0
+  entropy_weight: 0.02
+  eval_pairs: 40

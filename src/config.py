@@ -47,6 +47,27 @@ class TrainConfig:
 
 
 @dataclass
+class GovernorConfig:
+    """HRM intent governor (Phase 2) settings."""
+    hidden_dim: int = 20        # hidden width of the intent network
+    refine_steps: int = 2       # recursive refinement passes (§132.4)
+    init_mask: float = 0.9      # starting gate value (near baseline behavior)
+    granularity: str = "module"  # "module" (per parameter tensor); "weight" reserved
+
+
+@dataclass
+class MetaConfig:
+    """Meta-pretraining of the intent network (trained first, then frozen)."""
+    steps: int = 2500           # meta-training steps
+    batch_size: int = 256       # meta task batch
+    warmup_batches: int = 5     # plain updates on task A before the gated B step
+    lr: float = 1e-3            # governor learning rate + masked update scale
+    beta_old: float = 1.0       # weight of old-task retention in governor loss
+    entropy_weight: float = 0.02  # gate-decisiveness regularizer
+    eval_pairs: int = 40        # paired gated-vs-ungated sanity check pairs
+
+
+@dataclass
 class ExperimentConfig:
     """Top-level experiment configuration."""
     run_name: str = "baseline"
@@ -55,6 +76,8 @@ class ExperimentConfig:
     tasks: list[TaskConfig] = field(default_factory=list)
     model: ModelConfig = field(default_factory=ModelConfig)
     train: TrainConfig = field(default_factory=TrainConfig)
+    governor: GovernorConfig = field(default_factory=GovernorConfig)
+    meta: MetaConfig = field(default_factory=MetaConfig)
 
     @property
     def num_tasks(self) -> int:
@@ -92,6 +115,8 @@ def load_config(path: str) -> ExperimentConfig:
 
     model = ModelConfig(**raw.get("model", {}))
     train = TrainConfig(**raw.get("train", {}))
+    governor = GovernorConfig(**raw.get("governor", {}))
+    meta = MetaConfig(**raw.get("meta", {}))
 
     return ExperimentConfig(
         run_name=str(raw.get("run_name", "baseline")),
@@ -100,4 +125,6 @@ def load_config(path: str) -> ExperimentConfig:
         tasks=_build_tasks(raw.get("tasks", [])),
         model=model,
         train=train,
+        governor=governor,
+        meta=meta,
     )
