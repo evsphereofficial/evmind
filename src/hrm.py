@@ -297,7 +297,7 @@ class HRMController:
         self.device = device
 
     @torch.no_grad()
-    def control_update(
+    def compute_masks(
         self,
         model: nn.Module,
         x: torch.Tensor,
@@ -306,12 +306,12 @@ class HRMController:
         g_old_list: list[torch.Tensor] | None = None,
         snapshot: dict[str, torch.Tensor] | None = None,
     ) -> list[torch.Tensor]:
-        """Gate the accumulated gradients in place; returns the masks.
+        """Read-only gate computation (does NOT touch .grad).
 
         g_old_list: gradients of ALL previous tasks' losses w.r.t. current
-        params (accumulated once per phase by the caller) -> the "impact of
-        changing this weight on old knowledge" signal, same semantics as
-        meta-training. snapshot: phase-start params -> rel-change history.
+        params -> the "impact of changing this weight on old knowledge"
+        signal, same semantics as meta-training. snapshot: phase-start
+        params -> rel-change history.
         """
         hist_list = None
         if snapshot is not None:
@@ -321,13 +321,25 @@ class HRMController:
                 / (snapshot[g.name].abs() + eps)
                 for g in self.groups if g.name in snapshot
             ]
-        masks = self.governor.gate_from_model(
+        return self.governor.gate_from_model(
             model, self.groups, x, y, loss, self.device,
             g_old_list, hist_list)
+
+    @torch.no_grad()
+    def scale_update(
+        self,
+        model: nn.Module,
+        masks: list[torch.Tensor],
+        pre: dict[str, torch.Tensor],
+    ) -> None:
+        """Apply the gates to the ACTUAL optimizer update:
+        W = pre + M o (W_adam - pre). AdamW's per-weight normalization
+        would otherwise destroy the mask (it acts on raw grads only)."""
         for group, m in zip(self.groups, masks):
-            if group.param.grad is not None:
-                group.param.grad.mul_(m.reshape(group.param.shape))
-        return masks
+            if group.name not in pre:
+                continue
+            p = group.param.data
+            p.add_((m.reshape(p.shape) - 1.0) * (p - pre[group.name]))
 
 
 def measure_update_fraction(

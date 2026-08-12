@@ -58,14 +58,16 @@ def old_task_grads(
         return None
     model.zero_grad(set_to_none=True)
     for i in range(phase):
-        xs, ys = datasets.get((i, "test_grad")), None
-        if xs is None:
+        cached = datasets.get((i, "test_grad"))
+        if cached is None:
             task_ds = datasets[(i, "test")]
             gen = torch.Generator().manual_seed(10_000 + i)
             idx = torch.randperm(len(task_ds), generator=gen)[:512]
             xs = torch.stack([task_ds[j][0] for j in idx]).to(device)
             ys = torch.stack([task_ds[j][1] for j in idx]).to(device)
             datasets[(i, "test_grad")] = (xs, ys)
+        else:
+            xs, ys = cached
         loss = loss_fn(model(xs), ys)
         loss.backward()  # accumulate into .grad
     g_old = [g.param.grad.detach().clone() for g in groups]
@@ -100,9 +102,15 @@ def train_one_epoch_gated(
 
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
-        masks = controller.control_update(
+        # read-only gates from the governor (sees raw gB in .grad)
+        masks = controller.compute_masks(
             model, x, y, loss, g_old_list=g_old_list, snapshot=snapshot)
+        pre = {g.name: g.param.detach().clone()
+               for g in controller.groups}
         optimizer.step()
+        # apply gates to the real Adam update: W = pre + M o (W_adam - pre)
+        # (gating raw grads is undone by Adam's per-weight normalization)
+        controller.scale_update(model, masks, pre)
 
         if step == 0 or step == len(loader) - 1:
             stats = mask_stats(masks)

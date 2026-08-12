@@ -1,0 +1,111 @@
+{
+  "run_name": "phase2_hrm",
+  "config": {
+    "run_name": "phase2_hrm",
+    "train_samples": 10000,
+    "test_samples": 2000,
+    "tasks": [
+      {
+        "name": "horizontal",
+        "type": "horizontal",
+        "params": {}
+      },
+      {
+        "name": "vertical",
+        "type": "vertical",
+        "params": {}
+      },
+      {
+        "name": "circle",
+        "type": "circle",
+        "params": {
+          "r": 0.55
+        }
+      },
+      {
+        "name": "diagonal",
+        "type": "diagonal",
+        "params": {}
+      },
+      {
+        "name": "xor_quadrant",
+        "type": "xor",
+        "params": {}
+      }
+    ],
+    "model": {
+      "input_dim": 2,
+      "seq_len": 2,
+      "embedding_dim": 32,
+      "num_layers": 2,
+      "num_heads": 2,
+      "ff_dim": 64,
+      "dropout": 0.0
+    },
+    "train": {
+      "seed": 0,
+      "learning_rate": 0.001,
+      "batch_size": 128,
+      "epochs_per_task": 5,
+      "optimizer": "adamw",
+      "weight_decay": 0.0,
+      "num_workers": 0
+    },
+    "governor": {
+      "hidden_dim": 24,
+      "refine_steps": 2,
+      "init_mask": 0.5,
+      "granularity": "weight"
+    },
+    "meta": {
+      "steps": 200,
+      "meta_batch": 8,
+      "batch_size": 512,
+      "warmup_batches": 12,
+      "warmup_lr": 0.002,
+      "burst_steps": 3,
+      "lr": 0.001,
+      "burst_lr": 0.03,
+      "lambda_old": 1.0,
+      "lambda_sparse": 1.0,
+      "sparse_target": 0.3,
+      "lambda_ewc": 0.05,
+      "lambda_delta": 0.5,
+      "second_order": false,
+      "eval_pairs": 24
+    }
+  },
+  "device": "cuda",
+  "parameter_count": 17249,
+  "governor_params": 1753,
+  "num_groups": 29,
+  "granularity": "weight",
+  "training_time_seconds": {
+    "task1": 3.989,
+    "task2": 4.133,
+    "task3": 3.465,
+    "task4": 3.696,
+    "task5": 3.984
+  },
+  "total_training_seconds": 19.267,
+  "inference_latency_ms_per_sample": 0.0003323394998915319,
+  "peak_vram_mb": 37.01,
+  "peak_ram_mb": 1420.36,
+  "final_average_accuracy": 59.99000000000001,
+  "average_forgetting": 38.589999999999996,
+  "average_forgetting_overwritten": 48.2375,
+  "update_fractions": {
+    "task1": 99.86665893674996,
+    "task2": 99.7854948112934,
+    "task3": 99.64055887297815,
+    "task4": 99.54200243492376,
+    "task5": 99.5072178097281
+  },
+  "mean_rel_changes": {
+    "task1": 158748.91600887367,
+    "task2": 2.966875009367178,
+    "task3": 1.3192617338279198,
+    "task4": 1.1820772539760018,
+    "task5": 1.6651784549948985
+  }
+}
