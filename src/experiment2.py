@@ -166,9 +166,13 @@ def main() -> None:
     parser.add_argument("--config", default=str(PROJECT_ROOT / "configs" / "baseline2.yaml"))
     parser.add_argument("--governor", default=DEFAULT_GOVERNOR)
     parser.add_argument("--outdir", default=str(PROJECT_ROOT / "results_phase2"))
+    parser.add_argument("--seed", type=int, default=None,
+                        help="override the experiment seed (multi-seed verification)")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
+    if args.seed is not None:
+        cfg.train.seed = args.seed
     outdir = Path(args.outdir)
     outdir.mkdir(parents=True, exist_ok=True)
     for f in outdir.iterdir():

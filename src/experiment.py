@@ -113,9 +113,13 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="EvMind Phase 1 baseline")
     parser.add_argument("--config", default=str(PROJECT_ROOT / "configs" / "baseline.yaml"))
     parser.add_argument("--outdir", default=str(PROJECT_ROOT / "results"))
+    parser.add_argument("--seed", type=int, default=None,
+                        help="override the experiment seed (multi-seed verification)")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
+    if args.seed is not None:
+        cfg.train.seed = args.seed
     outdir = Path(args.outdir)
     outdir.mkdir(parents=True, exist_ok=True)
     # Fresh run: clear previous artifacts so results/ mirrors the latest run.
