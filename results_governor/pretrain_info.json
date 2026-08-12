@@ -41,23 +41,23 @@
     "lambda_sparse": 1.0,
     "lambda_delta": 0.5
   },
-  "training_seconds": 172.8,
+  "training_seconds": 168.0,
   "mask_stats_last": {
-    "mask_mean": 0.2817,
-    "mask_std": 0.0321,
-    "mask_min": 0.1554,
-    "mask_max": 0.4977,
-    "frac_lt_0.1": 0.0,
+    "mask_mean": 0.0551,
+    "mask_std": 0.0142,
+    "mask_min": 0.0313,
+    "mask_max": 0.2537,
+    "frac_lt_0.1": 0.9909,
     "frac_gt_0.9": 0.0
   },
   "meta_eval": {
     "pairs": 24.0,
     "acc_a_before_mean": 0.8477,
-    "acc_a_gated_mean": 0.8515,
+    "acc_a_gated_mean": 0.8522,
     "acc_a_ungated_mean": 0.8227,
-    "acc_b_gated_mean": 0.7307,
+    "acc_b_gated_mean": 0.7035,
     "acc_b_ungated_mean": 0.7444,
-    "old_task_retention_gain": 0.0288,
-    "new_task_cost": -0.0137
+    "old_task_retention_gain": 0.0295,
+    "new_task_cost": -0.0409
   }
 }

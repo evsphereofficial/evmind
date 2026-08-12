@@ -146,8 +146,10 @@ def gated_burst(
     gate_means = []
     ewc_costs = []
     g_old_hat = None
+    g_old_hat_all = None
     if g_old is not None:
         g_old_hat = [g.detach() / (g.abs().mean() + 1e-12) for g in g_old]
+        g_old_hat_all = torch.cat([h.flatten() for h in g_old_hat])
     xb = sample_chunk(steps, batch_size, seed_base, device)
     yb = meta_task_labels(xb, task)
     for s in range(steps):
@@ -169,9 +171,13 @@ def gated_burst(
 
         mask_log.append(mask_stats(masks))
         gate_means.append(torch.cat([m.flatten() for m in masks]).mean())
-        if g_old_hat is not None:
+        if g_old_hat_all is not None:
             m_all = torch.cat([m.flatten() for m in masks])
-            ewc_costs.append((m_all * g_old_hat ** 2).mean())
+            # zero-mean selectivity bias: mean(m*(gA_hat^2 - 1))
+            # = 0 for ANY uniform gate level -> shapes the distribution
+            # (close A-sensitive / open A-insensitive weights) without
+            # fighting the sparse-target level term
+            ewc_costs.append((m_all * g_old_hat_all ** 2).mean() - m_all.mean())
 
         for group, m, g in zip(groups, masks, grad_list):
             p_cur[group.name] = p_cur[group.name] - lr * m.reshape(g.shape) * g
@@ -446,7 +452,7 @@ def main() -> None:
           f"governor params: {governor.governor_params():,}")
     print(f"Objective: L_new + {m.lambda_old}*L_old "
           f"+ {m.lambda_sparse}*(mean(M)-{getattr(m, 'sparse_target', 0.3)})^2 "
-          f"+ {getattr(m, 'lambda_ewc', 0.0)}*mean(M*gA_hat^2) "
+          f"+ {getattr(m, 'lambda_ewc', 0.0)}*mean(M*(gA_hat^2-1)) "
           f"+ {m.lambda_delta}*mean(|dW|/|W|)")
     print(f"Meta-batching: {m.meta_batch} parallel steps per governor update, "
           f"{m.steps} updates, warmup={m.warmup_batches} burst={m.burst_steps} "
