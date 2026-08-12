@@ -146,6 +146,7 @@ def gated_burst(
     mem_imp: list[torch.Tensor] | None = None,
     mem_dir: list[torch.Tensor] | None = None,
     optim: str = "adamw",
+    close_threshold: float = 0.02,
 ) -> tuple[dict[str, torch.Tensor], list[dict], float]:
     """Unroll `steps` governor-gated updates on `task`.
 
@@ -153,14 +154,15 @@ def gated_burst(
       "adamw": stateless AdamW step W -= lr * M o m_hat/sqrt(v_hat)
                (mirrors experiment2's scale_update: the mask scales AdamW's
                normalized delta, NOT the raw gradient, which AdamW's
-               per-weight normalization would erase). This is the critical
-               transfer fix: meta-training used plain SGD at lr 0.03 over 3
-               steps (~0.09*|g| total movement), but the live stream runs
-               395 AdamW steps at lr 1e-3 whose normalized deltas accumulate
-               ~0.5 total movement PER PHASE. The same mask therefore caused
-               ~100x more damage live than in meta, which is why masks of
-               0.14-0.20 looked harmless during meta but catastrophically
-               overwrote old tasks in the stream.
+               per-weight normalization would erase). Weights gated below
+               close_threshold are HARD-CLOSED (effective mask = 0 and
+               their moments do not update), mirroring the live stream's
+               zero_closed_moments. This is the critical transfer fix:
+               meta-training used plain SGD at lr 0.03 over 3 steps
+               (~0.09*|g| total movement), but the live stream runs
+               395 AdamW steps at lr 1e-3 whose normalized deltas
+               accumulate ~0.5 total movement PER PHASE. The same mask
+               therefore caused ~100x more damage live than in meta.
       "sgd":  W -= lr * M o g (legacy, kept for comparison)
 
     Returns (final params dict, per-step mask stats, mean gate across steps).
@@ -213,10 +215,21 @@ def gated_burst(
             ewc_costs.append((m_all * g_old_hat_all ** 2).mean() - m_all.mean())
 
         for i, (group, m, g) in enumerate(zip(groups, masks, grad_list)):
+            # hard-close everything below the stream's close_threshold:
+            # a closed weight node must not move AT ALL (identity with the
+            # live stream's zero_closed_moments, which also prevents its
+            # Adam moments from accumulating)
+            if use_adam and close_threshold > 0.0:
+                m = torch.where(m < close_threshold,
+                                torch.zeros_like(m), m)
             mf = m.reshape(g.shape)
             if use_adam:
+                closed = mf == 0.0
                 m_buf[i] = beta1 * m_buf[i] + (1 - beta1) * g
                 v_buf[i] = beta2 * v_buf[i] + (1 - beta2) * g * g
+                if closed.any():
+                    m_buf[i] = m_buf[i].masked_fill(closed, 0.0)
+                    v_buf[i] = v_buf[i].masked_fill(closed, 0.0)
                 t = s + 1
                 m_hat = m_buf[i] / (1 - beta1 ** t)
                 v_hat = v_buf[i] / (1 - beta2 ** t)
@@ -329,7 +342,8 @@ def meta_step(
         lr=base_lr, steps=m.burst_steps, batch_size=bsize,
         seed_base=seed_off * 37 + 5, device=device, differentiable=True,
         g_old=g_old_imm, p0=p0, second_order=m.second_order,
-        mem_imp=mem_imp, mem_dir=mem_dir, optim=optim_name)
+        mem_imp=mem_imp, mem_dir=mem_dir, optim=optim_name,
+        close_threshold=getattr(m, "close_threshold", 0.02))
 
     x_bv = _sample_batch(bsize, seed_offset=seed_off * 43 + 11).to(device)
     y_bv = meta_task_labels(x_bv, fam_b).to(device)
@@ -465,7 +479,8 @@ def meta_evaluate(
             lr=base_lr, steps=m.burst_steps, batch_size=bsize,
             seed_base=p * 157 + 5, device=device, differentiable=False,
             g_old=g_old_imm, p0=p0, mem_imp=mem_imp, mem_dir=mem_dir,
-            optim=getattr(m, "burst_optim", "adamw"))
+            optim=getattr(m, "burst_optim", "adamw"),
+            close_threshold=getattr(m, "close_threshold", 0.02))
         with torch.no_grad():
             acc_a_gated = float(np.mean([
                 (functional_call(model, p_g, (xa,)) > 0).float()

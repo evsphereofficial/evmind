@@ -85,6 +85,10 @@ class MetaConfig:
     burst_lr: float = 3e-2      # masked update scale during the B burst if
                                 # burst_optim=sgd; for adamw the burst uses the
                                 # LIVE lr (meta.lr must equal the train lr)
+    close_threshold: float = 0.02  # hard-close masks below this in the burst
+                                # (mirrors governor.close_threshold in the
+                                # live stream: zero movement + zero Adam
+                                # moments for closed weight nodes)
     lambda_old: float = 1.0     # weight of old-task degradation penalty
     lambda_sparse: float = 1.0  # weight of (mean(M)-sparse_target)^2
     sparse_target: float = 0.3  # desired fraction of open gate mass

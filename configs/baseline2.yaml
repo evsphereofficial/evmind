@@ -98,10 +98,13 @@ meta:
   lr: 0.001
   burst_optim: adamw
   burst_lr: 0.03        # legacy SGD burst lr (only used if burst_optim=sgd)
+  close_threshold: 0.02 # mirrors governor.close_threshold: masks below this
+                        # are hard-closed in the burst too (no movement, no
+                        # Adam moments) so meta equals the live stream
   lambda_old: 1.0
   lambda_sparse: 1.0
   sparse_target: 0.3
-  lambda_ewc: 0.05
+  lambda_ewc: 0.3
   lambda_delta: 0.5
   eval_pairs: 24
   old_tasks_max: 2
