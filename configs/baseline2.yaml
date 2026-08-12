@@ -72,6 +72,6 @@ meta:
   lambda_old: 1.0
   lambda_sparse: 1.0
   sparse_target: 0.3
-  lambda_ewc: 1.0
+  lambda_ewc: 0.05
   lambda_delta: 0.5
   eval_pairs: 24

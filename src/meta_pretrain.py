@@ -136,6 +136,7 @@ def gated_burst(
     differentiable: bool,
     ungated: bool = False,
     g_old: list[torch.Tensor] | None = None,
+    p0: dict[str, torch.Tensor] | None = None,
     second_order: bool = False,
 ) -> tuple[dict[str, torch.Tensor], list[dict], float]:
     """Unroll `steps` governor-gated updates on `task`.
@@ -165,9 +166,14 @@ def gated_burst(
         if ungated:
             masks = [torch.ones_like(p_cur[g.name].flatten()) for g in groups]
         else:
+            hist = None
+            if p0 is not None:
+                hist = [(p_cur[g.name] - p0[g.name]).abs()
+                        / (p0[g.name].abs() + 1e-8) for g in groups]
             masks = governor.gate_from_state(
                 p_cur, grad_list, groups, x, y, loss, device,
-                differentiable=differentiable, g_old_list=g_old)
+                differentiable=differentiable, g_old_list=g_old,
+                hist_list=hist)
 
         mask_log.append(mask_stats(masks))
         gate_means.append(torch.cat([m.flatten() for m in masks]).mean())
@@ -262,7 +268,7 @@ def meta_step(
         model, governor, groups, p_cur, fam_b,
         lr=base_lr, steps=m.burst_steps, batch_size=bsize,
         seed_base=seed_off * 37 + 5, device=device, differentiable=True,
-        g_old=g_old, second_order=m.second_order)
+        g_old=g_old, p0=p0, second_order=m.second_order)
 
     x_av = _sample_batch(bsize, seed_offset=seed_off * 41 + 9).to(device)
     y_av = meta_task_labels(x_av, fam_a).to(device)
@@ -348,11 +354,13 @@ def meta_evaluate(
         g_old = torch.autograd.grad(
             aloss, [p_g[g.name] for g in groups],
             create_graph=False, allow_unused=False)
+        p0 = {g.name: t.detach().clone() for g, t in
+              zip(groups, [p_g[g.name] for g in groups])}
         p_g, _, _, _ = gated_burst(
             model, governor, groups, p_g, fam_b,
             lr=base_lr, steps=m.burst_steps, batch_size=bsize,
             seed_base=p * 157 + 5, device=device, differentiable=False,
-            g_old=g_old)
+            g_old=g_old, p0=p0)
         with torch.no_grad():
             pred_a = functional_call(model, p_g, (xa_te,))
             acc_a_gated = (pred_a > 0).float().eq(ya_te).float().mean().item()
@@ -403,6 +411,10 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="HRM intent governor meta-pretraining")
     parser.add_argument("--config", default=str(PROJECT_ROOT / "configs" / "baseline2.yaml"))
     parser.add_argument("--outdir", default=str(PROJECT_ROOT / "results_governor"))
+    parser.add_argument("--sparse-target", type=float, default=None,
+                        help="plasticity budget: desired mean(M) (Pareto sweep)")
+    parser.add_argument("--steps", type=int, default=None,
+                        help="override governor optimizer update count")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
@@ -421,6 +433,13 @@ def main() -> None:
         torch.backends.cuda.enable_mem_efficient_sdp(False)
     torch.backends.cudnn.benchmark = True  # speed over strict determinism
     print(f"Device: {device}")
+
+    # plasticity-budget override: --sparse-target sweeps the objective's
+    # desired mean(M), tracing the retention-vs-new-task Pareto frontier
+    if args.sparse_target is not None:
+        cfg.meta.sparse_target = args.sparse_target
+    if args.steps is not None:
+        cfg.meta.steps = args.steps
 
     model = TinyNumericTransformer(
         input_dim=cfg.model.input_dim,
@@ -521,6 +540,8 @@ def main() -> None:
         "granularity": governor.granularity,
         "group_names": [g.name for g in groups],
         "objective": {"lambda_old": m.lambda_old, "lambda_sparse": m.lambda_sparse,
+                      "sparse_target": m.sparse_target,
+                      "lambda_ewc": getattr(m, "lambda_ewc", 0.0),
                       "lambda_delta": m.lambda_delta},
         "training_seconds": round(time.perf_counter() - start, 1),
         "mask_stats_last": {k: round(v, 4) for k, v in log[-1].items()
