@@ -1,0 +1,43 @@
+# EvMind Phase 1 baseline — single-node live-learning retention experiment.
+# All hyperparameters are configured here. See src/config.py for the schema.
+
+run_name: baseline
+
+# Dataset sizes per task (effectively unlimited fresh samples available).
+train_samples: 10000
+test_samples: 2000
+
+# Five sequential tasks with different decision boundaries.
+# NOTE: samples never carry a task-ID field -- the model cannot memorize
+#       a trivial task_id -> classifier mapping.
+tasks:
+  - name: horizontal   # y > 0
+    type: horizontal
+  - name: vertical     # x > 0
+    type: vertical
+  - name: circle       # x^2 + y^2 > r^2
+    type: circle
+    params:
+      r: 0.55
+  - name: diagonal     # x + y > 0
+    type: diagonal
+  - name: xor_quadrant # (x > 0) != (y > 0)
+    type: xor
+
+model:
+  input_dim: 2
+  seq_len: 2
+  embedding_dim: 32
+  num_layers: 2
+  num_heads: 2
+  ff_dim: 64
+  dropout: 0.0
+
+train:
+  seed: 0
+  learning_rate: 0.001
+  batch_size: 128
+  epochs_per_task: 5
+  optimizer: adamw
+  weight_decay: 0.0
+  num_workers: 0
