@@ -533,6 +533,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="HRM intent governor meta-pretraining")
     parser.add_argument("--config", default=str(PROJECT_ROOT / "configs" / "baseline2.yaml"))
     parser.add_argument("--outdir", default=str(PROJECT_ROOT / "results_governor"))
+    parser.add_argument("--seed", type=int, default=None,
+                        help="override the experiment seed (multi-seed sweep)")
     parser.add_argument("--sparse-target", type=float, default=None,
                         help="plasticity budget: desired mean(M) (Pareto sweep)")
     parser.add_argument("--steps", type=int, default=None,
@@ -550,6 +552,8 @@ def main() -> None:
     args = parser.parse_args()
 
     cfg = load_config(args.config)
+    if args.seed is not None:
+        cfg.train.seed = args.seed
     if args.old_tasks_max is not None:
         cfg.meta.old_tasks_max = args.old_tasks_max
     if args.memory_agg is not None:
