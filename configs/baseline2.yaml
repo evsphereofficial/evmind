@@ -53,6 +53,12 @@ governor:
   refine_steps: 2
   init_mask: 0.5
   granularity: weight
+  # FIX 2: gates below this threshold are DECISION-CLOSED weight nodes.
+  # The scale_update mechanism alone still let AdamW's unmasked momentum
+  # drag gated weights along (measured 2%-of-raw drift at mask=0.02
+  # overwrote the old task); zeroing the Adam moments per step turns a
+  # protected weight into a truly immutable node.
+  close_threshold: 0.02
 
 # First stage: meta-pretrain the intent network on the same geometry families
 # with randomized boundary shifts (disclosed in MASTER.md).

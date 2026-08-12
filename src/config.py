@@ -54,6 +54,9 @@ class GovernorConfig:
     init_mask: float = 0.5      # starting gate value (neutral; sparse cost pushes down)
     granularity: str = "weight"  # "weight" = one gate per parameter (17,249 gates);
                                  # "module" = one gate per parameter tensor
+    close_threshold: float = 0.02  # FIX 2: masks below this = closed weight
+                                   # NODES (Adam moments zeroed so momentum
+                                   # cannot keep forcing the node open)
 
 
 @dataclass

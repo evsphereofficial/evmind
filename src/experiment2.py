@@ -86,6 +86,7 @@ def train_one_epoch_gated(
     g_old_list: list[torch.Tensor] | None,
     snapshot: dict[str, torch.Tensor],
     memory: SensitivityMemory | None = None,
+    close_threshold: float = 0.02,
 ) -> tuple[float, float, float]:
     """One epoch with governor-gated gradient updates (§17 control_update)."""
     model.train()
@@ -113,6 +114,14 @@ def train_one_epoch_gated(
         # apply gates to the real Adam update: W = pre + M o (W_adam - pre)
         # (gating raw grads is undone by Adam's per-weight normalization)
         controller.scale_update(model, masks, pre)
+        # FIX 2: weights the governor closed below the threshold become TRUE
+        # closed nodes - their AdamW moments are zeroed so momentum cannot
+        # keep re-proposing full-strength deltas that the gate must fight
+        # every batch (the measured 2%-of-raw drift at mask=0.02 was enough
+        # to overwrite the old task).
+        if close_threshold > 0.0:
+            controller.zero_closed_moments(
+                optimizer, masks, threshold=close_threshold)
 
         if step == 0 or step == len(loader) - 1:
             stats = mask_stats(masks)
@@ -236,6 +245,9 @@ def main() -> None:
 
     optimizer = make_optimizer(model, cfg, cfg.train.learning_rate, cfg.train.weight_decay)
     loss_fn = torch.nn.BCEWithLogitsLoss()
+    # FIX 2 policy: masks below this threshold = weight nodes the governor
+    # decided to protect -> fully closed (Adam moments zeroed per step).
+    close_threshold = float(getattr(cfg.governor, "close_threshold", 0.02))
 
     print("=" * 60)
     print("PHASE 2 — HRM-GOVERNED LIVE LEARNING")
@@ -282,7 +294,7 @@ def main() -> None:
             loss, acc, secs = train_one_epoch_gated(
                 model, train_loader, optimizer, loss_fn, device,
                 controller, mask_rows, phase + 1, g_old_imm, snapshot,
-                memory=memory)
+                memory=memory, close_threshold=close_threshold)
             log_rows.append({
                 "task": task_name, "phase": phase + 1, "epoch": epoch + 1,
                 "train_loss": round(loss, 5),

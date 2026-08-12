@@ -508,6 +508,44 @@ class HRMController:
             p = group.param.data
             p.add_((m.reshape(p.shape) - 1.0) * (p - pre[group.name]))
 
+    @torch.no_grad()
+    def zero_closed_moments(
+        self,
+        optimizer: torch.optim.Optimizer,
+        masks: list[torch.Tensor],
+        threshold: float = 0.02,
+    ) -> int:
+        """FIX 2: fully close weight NODES the governor decided to protect.
+
+        Even with scale_update, a weight gated near 0 keeps being dragged
+        by AdamW's momentum: exp_avg/exp_avg_sq accumulate the UNMASKED
+        gradient every step, so each optimizer.step() re-proposes a large
+        delta and the gate must fight the full momentum state every batch
+        (measured: mask=0.02 still drifted 0.0093 over one phase - exactly
+        2% of the raw 0.4874 - and that 2% was enough to destroy the old
+        task). Zeroing the two moments for weights with mask < threshold
+        turns a "heavily dampened" weight into a truly closed node: no
+        momentum, no proposal, no drift. The gate policy is the decision;
+        this is the enforcement.
+
+        Returns the number of weights whose moments were zeroed.
+        """
+        n_zeroed = 0
+        for group, m in zip(self.groups, masks):
+            mf = m.reshape(group.param.shape)
+            closed = mf < threshold
+            if not closed.any():
+                continue
+            st = optimizer.state.get(group.param)
+            if st is None:
+                continue
+            for key in ("exp_avg", "exp_avg_sq"):
+                buf = st.get(key)
+                if buf is not None:
+                    buf.masked_fill_(closed, 0.0)
+            n_zeroed += int(closed.sum().item())
+        return n_zeroed
+
 
 def measure_update_fraction(
     model: nn.Module,
