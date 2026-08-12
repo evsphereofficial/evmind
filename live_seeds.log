@@ -1,0 +1,191 @@
+=== STREAM SEED 0 ===
+  Final accuracy:   69.35%
+  Forgetting:       0.00%
+  Update fraction:  98.97%   mean rel |dW|: 1.0868
+
+============================================================
+Average Forgetting: 18.23%
+Average Forgetting (overwritten tasks 1..4): 22.79%
+Final Average Accuracy: 68.92%
+
+--- COMPARISON vs PHASE 1 (plain training) ---
+  Avg forgetting         : Phase1 39.89%  ->  Phase2 18.23%
+  Avg forgetting (1..N-1): Phase1 49.86%  ->  Phase2 22.79%
+  Final avg accuracy     : Phase1 59.27%  ->  Phase2 68.92%
+Total training time: 30.2s
+Peak VRAM: 37.11 MB
+Peak RAM: 1417.37 MB
+============================================================
+Outputs written to results_seeds/s0_stream/
+=== STREAM SEED 1 ===
+  Final accuracy:   70.90%
+  Forgetting:       0.00%
+  Update fraction:  98.79%   mean rel |dW|: 1.2070
+
+============================================================
+Average Forgetting: 15.64%
+Average Forgetting (overwritten tasks 1..4): 19.55%
+Final Average Accuracy: 71.30%
+
+--- COMPARISON vs PHASE 1 (plain training) ---
+  Avg forgetting         : Phase1 39.89%  ->  Phase2 15.64%
+  Avg forgetting (1..N-1): Phase1 49.86%  ->  Phase2 19.55%
+  Final avg accuracy     : Phase1 59.27%  ->  Phase2 71.30%
+Total training time: 33.0s
+Peak VRAM: 37.11 MB
+Peak RAM: 1420.71 MB
+============================================================
+Outputs written to results_seeds/s1_stream/
+=== STREAM SEED 2 ===
+  Final accuracy:   68.90%
+  Forgetting:       0.00%
+  Update fraction:  98.93%   mean rel |dW|: 1.9679
+
+============================================================
+Average Forgetting: 16.60%
+Average Forgetting (overwritten tasks 1..4): 20.75%
+Final Average Accuracy: 69.42%
+
+--- COMPARISON vs PHASE 1 (plain training) ---
+  Avg forgetting         : Phase1 39.89%  ->  Phase2 16.60%
+  Avg forgetting (1..N-1): Phase1 49.86%  ->  Phase2 20.75%
+  Final avg accuracy     : Phase1 59.27%  ->  Phase2 69.42%
+Total training time: 33.2s
+Peak VRAM: 37.11 MB
+Peak RAM: 1416.04 MB
+============================================================
+Outputs written to results_seeds/s2_stream/
+=== STREAM SEED 3 ===
+  Final accuracy:   70.35%
+  Forgetting:       0.00%
+  Update fraction:  98.94%   mean rel |dW|: 1.4290
+
+============================================================
+Average Forgetting: 16.04%
+Average Forgetting (overwritten tasks 1..4): 20.05%
+Final Average Accuracy: 71.11%
+
+--- COMPARISON vs PHASE 1 (plain training) ---
+  Avg forgetting         : Phase1 39.89%  ->  Phase2 16.04%
+  Avg forgetting (1..N-1): Phase1 49.86%  ->  Phase2 20.05%
+  Final avg accuracy     : Phase1 59.27%  ->  Phase2 71.11%
+Total training time: 33.2s
+Peak VRAM: 37.11 MB
+Peak RAM: 1416.0 MB
+============================================================
+Outputs written to results_seeds/s3_stream/
+=== STREAM SEED 4 ===
+  Final accuracy:   66.75%
+  Forgetting:       0.00%
+  Update fraction:  99.02%   mean rel |dW|: 1.4603
+
+============================================================
+Average Forgetting: 18.10%
+Average Forgetting (overwritten tasks 1..4): 22.62%
+Final Average Accuracy: 69.20%
+
+--- COMPARISON vs PHASE 1 (plain training) ---
+  Avg forgetting         : Phase1 39.89%  ->  Phase2 18.10%
+  Avg forgetting (1..N-1): Phase1 49.86%  ->  Phase2 22.62%
+  Final avg accuracy     : Phase1 59.27%  ->  Phase2 69.20%
+Total training time: 31.9s
+Peak VRAM: 37.11 MB
+Peak RAM: 1416.02 MB
+============================================================
+Outputs written to results_seeds/s4_stream/
+=== STREAM SEED 5 ===
+  Final accuracy:   69.15%
+  Forgetting:       0.00%
+  Update fraction:  99.03%   mean rel |dW|: 1.9969
+
+============================================================
+Average Forgetting: 16.12%
+Average Forgetting (overwritten tasks 1..4): 20.15%
+Final Average Accuracy: 70.49%
+
+--- COMPARISON vs PHASE 1 (plain training) ---
+  Avg forgetting         : Phase1 39.89%  ->  Phase2 16.12%
+  Avg forgetting (1..N-1): Phase1 49.86%  ->  Phase2 20.15%
+  Final avg accuracy     : Phase1 59.27%  ->  Phase2 70.49%
+Total training time: 30.6s
+Peak VRAM: 37.11 MB
+Peak RAM: 1415.68 MB
+============================================================
+Outputs written to results_seeds/s5_stream/
+=== STREAM SEED 6 ===
+  Final accuracy:   68.45%
+  Forgetting:       0.00%
+  Update fraction:  98.94%   mean rel |dW|: 2.3182
+
+============================================================
+Average Forgetting: 16.33%
+Average Forgetting (overwritten tasks 1..4): 20.41%
+Final Average Accuracy: 69.76%
+
+--- COMPARISON vs PHASE 1 (plain training) ---
+  Avg forgetting         : Phase1 39.89%  ->  Phase2 16.33%
+  Avg forgetting (1..N-1): Phase1 49.86%  ->  Phase2 20.41%
+  Final avg accuracy     : Phase1 59.27%  ->  Phase2 69.76%
+Total training time: 32.2s
+Peak VRAM: 37.11 MB
+Peak RAM: 1420.86 MB
+============================================================
+Outputs written to results_seeds/s6_stream/
+=== STREAM SEED 7 ===
+  Final accuracy:   68.95%
+  Forgetting:       0.00%
+  Update fraction:  99.20%   mean rel |dW|: 1.6244
+
+============================================================
+Average Forgetting: 16.16%
+Average Forgetting (overwritten tasks 1..4): 20.20%
+Final Average Accuracy: 69.87%
+
+--- COMPARISON vs PHASE 1 (plain training) ---
+  Avg forgetting         : Phase1 39.89%  ->  Phase2 16.16%
+  Avg forgetting (1..N-1): Phase1 49.86%  ->  Phase2 20.20%
+  Final avg accuracy     : Phase1 59.27%  ->  Phase2 69.87%
+Total training time: 31.8s
+Peak VRAM: 37.11 MB
+Peak RAM: 1419.83 MB
+============================================================
+Outputs written to results_seeds/s7_stream/
+=== STREAM SEED 8 ===
+  Final accuracy:   69.60%
+  Forgetting:       0.00%
+  Update fraction:  99.08%   mean rel |dW|: 1.1706
+
+============================================================
+Average Forgetting: 16.95%
+Average Forgetting (overwritten tasks 1..4): 21.19%
+Final Average Accuracy: 70.25%
+
+--- COMPARISON vs PHASE 1 (plain training) ---
+  Avg forgetting         : Phase1 39.89%  ->  Phase2 16.95%
+  Avg forgetting (1..N-1): Phase1 49.86%  ->  Phase2 21.19%
+  Final avg accuracy     : Phase1 59.27%  ->  Phase2 70.25%
+Total training time: 34.1s
+Peak VRAM: 37.11 MB
+Peak RAM: 1415.79 MB
+============================================================
+Outputs written to results_seeds/s8_stream/
+=== STREAM SEED 9 ===
+  Final accuracy:   71.30%
+  Forgetting:       0.00%
+  Update fraction:  98.92%   mean rel |dW|: 1.8440
+
+============================================================
+Average Forgetting: 14.62%
+Average Forgetting (overwritten tasks 1..4): 18.27%
+Final Average Accuracy: 71.33%
+
+--- COMPARISON vs PHASE 1 (plain training) ---
+  Avg forgetting         : Phase1 39.89%  ->  Phase2 14.62%
+  Avg forgetting (1..N-1): Phase1 49.86%  ->  Phase2 18.27%
+  Final avg accuracy     : Phase1 59.27%  ->  Phase2 71.33%
+Total training time: 30.8s
+Peak VRAM: 37.11 MB
+Peak RAM: 1430.31 MB
+============================================================
+Outputs written to results_seeds/s9_stream/
+=== LIVE SEED SWEEP COMPLETE ===

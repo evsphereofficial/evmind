@@ -1,0 +1,25 @@
+Device: cuda
+============================================================
+HRM INTENT GOVERNOR META-PRETRAINING
+============================================================
+Base model params: 17,249  totally controlled weights: 17,249
+Mode: mlp  governor params: 1,777
+Objective: L_new + 1.0*L_old + 1.0*(mean(M)-0.3)^2 + 0.3*mean(M*(gA_hat^2-1)) + 0.5*mean(|dW|/|W|)
+Meta-batching: 8 parallel steps per governor update, 390 updates, warmup=12 burst=3xadamw batch=512
+Old-knowledge memory: depth 0..2 tasks, agg='ewc' (I_mem = accumulated per-weight importance, g_mem = direction)
+
+
+============================================================
+GOVERNOR META-PRETRAINING COMPLETE
+============================================================
+Governor params: 1,777 controlling 17,249 weights (weight-level)
+Pairs evaluated: 24
+  old-task acc BEFORE B burst : 78.64%
+  old-task acc AFTER  gated   : 78.32%
+  old-task acc AFTER  ungated : 75.75%
+  retention gain (mask vs plain): +2.57%
+  new-task acc gated   : 65.93%
+  new-task acc ungated : 73.49%
+  new-task cost of protecting: -7.55%
+Training took 501s
+Saved governor to results_governor/governor_pretrained.pt

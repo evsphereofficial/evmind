@@ -644,30 +644,30 @@ def main() -> None:
         gov_opt.step()
 
         o = outs[-1]
-    vals = (o["loss_new"], o["loss_old"], o["sparse_cost"],
-            o["ewc_cost"], o["delta_cost"])
-    for key, v in zip(ema, vals):
-        ema[key] = 0.98 * ema[key] + 0.02 * float(v.detach())
+        vals = (o["loss_new"], o["loss_old"], o["sparse_cost"],
+                o["ewc_cost"], o["delta_cost"])
+        for key, v in zip(ema, vals):
+            ema[key] = 0.98 * ema[key] + 0.02 * float(v.detach())
 
-    if step % 50 == 0 or step == 1:
-        stats = o["mask_stats"]
-        log.append({
-            "step": step,
-            "gov_loss": float(total_loss.detach()),
-            "loss_new": float(o["loss_new"].detach()),
-            "loss_old": float(o["loss_old"].detach()),
-            "sparse_cost": float(o["sparse_cost"].detach()),
-            "ewc_cost": float(o["ewc_cost"].detach()),
-            "delta_cost": float(o["delta_cost"].detach()),
-            "phase_scale": float(o["phase_scale"]),
-            **{k: round(v, 4) for k, v in stats.items()},
-        })
-        print(f"step {step:5d}/{m.steps}  L_new={ema['L_new']:.4f} "
-              f"L_old={ema['L_old']:.4f}  sp={ema['sparse']:.4f} "
-              f"ewc={ema['ewc']:.4f} dW={ema['delta']:.5f}  "
-              f"| mask mean={stats['mask_mean']:.3f} "
-              f"min={stats['mask_min']:.3f} max={stats['mask_max']:.3f} "
-              f"<0.1:{stats['frac_lt_0.1']:.2f} >0.9:{stats['frac_gt_0.9']:.2f}")
+        if step % 50 == 0 or step == 1:
+            stats = o["mask_stats"]
+            log.append({
+                "step": step,
+                "gov_loss": float(total_loss.detach()),
+                "loss_new": float(o["loss_new"].detach()),
+                "loss_old": float(o["loss_old"].detach()),
+                "sparse_cost": float(o["sparse_cost"].detach()),
+                "ewc_cost": float(o["ewc_cost"].detach()),
+                "delta_cost": float(o["delta_cost"].detach()),
+                "phase_scale": float(o["phase_scale"]),
+                **{k: round(v, 4) for k, v in stats.items()},
+            })
+            print(f"step {step:5d}/{m.steps}  L_new={ema['L_new']:.4f} "
+                  f"L_old={ema['L_old']:.4f}  sp={ema['sparse']:.4f} "
+                  f"ewc={ema['ewc']:.4f} dW={ema['delta']:.5f}  "
+                  f"| mask mean={stats['mask_mean']:.3f} "
+                  f"min={stats['mask_min']:.3f} max={stats['mask_max']:.3f} "
+                  f"<0.1:{stats['frac_lt_0.1']:.2f} >0.9:{stats['frac_gt_0.9']:.2f}")
 
     pd.DataFrame(log).to_csv(outdir / "meta_train_log.csv", index=False)
 

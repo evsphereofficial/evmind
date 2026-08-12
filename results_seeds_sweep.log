@@ -1,1 +1,39 @@
 === SEED 0 ===
+  retention gain (mask vs plain): +6.10%
+  new-task acc gated   : 57.96%
+  new-task acc ungated : 63.27%
+  new-task cost of protecting: -5.31%
+Training took 241s
+Saved governor to results_seeds/s0_governor/governor_pretrained.pt
+  Initial accuracy: 98.95%
+  Final accuracy:   75.35%
+  Forgetting:       23.60%
+  Update fraction:  99.62%   mean rel |dW|: 0.9664
+
+Task 5 (xor_quadrant):
+  Initial accuracy: 69.20%
+  Final accuracy:   69.20%
+  Forgetting:       0.00%
+  Update fraction:  99.28%   mean rel |dW|: 1.3307
+
+============================================================
+Average Forgetting: 17.58%
+Average Forgetting (overwritten tasks 1..4): 21.97%
+Final Average Accuracy: 69.17%
+
+--- COMPARISON vs PHASE 1 (plain training) ---
+  Avg forgetting         : Phase1 39.89%  ->  Phase2 17.58%
+  Avg forgetting (1..N-1): Phase1 49.86%  ->  Phase2 21.97%
+  Final avg accuracy     : Phase1 59.27%  ->  Phase2 69.17%
+Total training time: 30.7s
+Peak VRAM: 37.11 MB
+Peak RAM: 1417.5 MB
+============================================================
+Outputs written to results_seeds/s0_stream/
+=== SEED 1 ===
+  retention gain (mask vs plain): +5.29%
+  new-task acc gated   : 60.72%
+  new-task acc ungated : 66.92%
+  new-task cost of protecting: -6.20%
+Training took 237s
+Saved governor to results_seeds/s1_governor/governor_pretrained.pt
