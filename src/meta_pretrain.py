@@ -144,6 +144,7 @@ def gated_burst(
     """
     mask_log: list[dict] = []
     gate_means = []
+    ewc_costs = []
     xb = sample_chunk(steps, batch_size, seed_base, device)
     yb = meta_task_labels(xb, task)
     for s in range(steps):
@@ -165,12 +166,16 @@ def gated_burst(
 
         mask_log.append(mask_stats(masks))
         gate_means.append(torch.cat([m.flatten() for m in masks]).mean())
+        if g_old_hat is not None:
+            m_all = torch.cat([m.flatten() for m in masks])
+            ewc_costs.append((m_all * g_old_hat ** 2).mean())
 
         for group, m, g in zip(groups, masks, grad_list):
             p_cur[group.name] = p_cur[group.name] - lr * m.reshape(g.shape) * g
 
     mean_gate = torch.stack(gate_means).mean()
-    return p_cur, mask_log, mean_gate
+    mean_ewc = torch.stack(ewc_costs).mean() if ewc_costs else None
+    return p_cur, mask_log, mean_gate, mean_ewc
 
 
 def warmup_batches(
