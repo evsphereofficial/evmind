@@ -80,6 +80,9 @@ class MetaConfig:
     lambda_old: float = 1.0     # weight of old-task degradation penalty
     lambda_sparse: float = 1.0  # weight of (mean(M)-sparse_target)^2
     sparse_target: float = 0.3  # desired fraction of open gate mass
+    lambda_ewc: float = 0.2     # weight of mean(M * gA_hat^2): close gates on
+                                # A-sensitive weights (per-weight EWC-style
+                                # inductive bias; direct valid gradient)
     lambda_delta: float = 0.5   # weight of mean relative |dW| (change cost)
     second_order: bool = False  # short-horizon FOMAML is valid & stable here
     eval_pairs: int = 24        # paired gated-vs-ungated sanity check pairs

@@ -145,6 +145,9 @@ def gated_burst(
     mask_log: list[dict] = []
     gate_means = []
     ewc_costs = []
+    g_old_hat = None
+    if g_old is not None:
+        g_old_hat = [g.detach() / (g.abs().mean() + 1e-12) for g in g_old]
     xb = sample_chunk(steps, batch_size, seed_base, device)
     yb = meta_task_labels(xb, task)
     for s in range(steps):
@@ -249,7 +252,7 @@ def meta_step(
         aloss, [p_cur[g.name] for g in groups],
         create_graph=False, allow_unused=False)
 
-    p_cur, mask_log, mean_gate = gated_burst(
+    p_cur, mask_log, mean_gate, mean_ewc = gated_burst(
         model, governor, groups, p_cur, fam_b,
         lr=base_lr, steps=m.burst_steps, batch_size=bsize,
         seed_base=seed_off * 37 + 5, device=device, differentiable=True,
@@ -272,12 +275,14 @@ def meta_step(
     mean_rel_change = torch.stack(rel_changes).mean()
 
     sparse_cost = (mean_gate - getattr(m, "sparse_target", 0.3)) ** 2
+    ewc_cost = mean_ewc if mean_ewc is not None else torch.zeros((), device=device)
 
     # objective per user spec: parameter modification itself is expensive
     gov_loss = (
         loss_new
         + m.lambda_old * loss_old
         + m.lambda_sparse * sparse_cost
+        + getattr(m, "lambda_ewc", 0.0) * ewc_cost
         + m.lambda_delta * mean_rel_change
     )
 
@@ -287,6 +292,7 @@ def meta_step(
         "loss_new": loss_new,
         "loss_old": loss_old,
         "sparse_cost": sparse_cost,
+        "ewc_cost": ewc_cost,
         "delta_cost": mean_rel_change,
         "mask_stats": mask_log[-1],
     }
@@ -336,7 +342,7 @@ def meta_evaluate(
         g_old = torch.autograd.grad(
             aloss, [p_g[g.name] for g in groups],
             create_graph=False, allow_unused=False)
-        p_g, _, _ = gated_burst(
+        p_g, _, _, _ = gated_burst(
             model, governor, groups, p_g, fam_b,
             lr=base_lr, steps=m.burst_steps, batch_size=bsize,
             seed_base=p * 157 + 5, device=device, differentiable=False,
@@ -353,7 +359,7 @@ def meta_evaluate(
         # ---- ungated burst (ordinary updates = Phase 1 behavior) ----
         p_u = {g.name: g.param.detach().clone().requires_grad_(True)
                for g in groups}
-        p_u, _, _ = gated_burst(
+        p_u, _, _, _ = gated_burst(
             model, governor, groups, p_u, fam_b,
             lr=base_lr, steps=m.burst_steps, batch_size=bsize,
             seed_base=p * 157 + 5, device=device, differentiable=False,
@@ -440,6 +446,7 @@ def main() -> None:
           f"governor params: {governor.governor_params():,}")
     print(f"Objective: L_new + {m.lambda_old}*L_old "
           f"+ {m.lambda_sparse}*(mean(M)-{getattr(m, 'sparse_target', 0.3)})^2 "
+          f"+ {getattr(m, 'lambda_ewc', 0.0)}*mean(M*gA_hat^2) "
           f"+ {m.lambda_delta}*mean(|dW|/|W|)")
     print(f"Meta-batching: {m.meta_batch} parallel steps per governor update, "
           f"{m.steps} updates, warmup={m.warmup_batches} burst={m.burst_steps} "
@@ -451,7 +458,7 @@ def main() -> None:
     start = time.perf_counter()
 
     log: list[dict] = []
-    ema = {"L_new": 0.0, "L_old": 0.0, "sparse": 0.0, "delta": 0.0}
+    ema = {"L_new": 0.0, "L_old": 0.0, "sparse": 0.0, "ewc": 0.0, "delta": 0.0}
 
     for step in range(1, m.steps + 1):
         outs = []
@@ -465,7 +472,8 @@ def main() -> None:
         gov_opt.step()
 
         o = outs[-1]
-        vals = (o["loss_new"], o["loss_old"], o["sparse_cost"], o["delta_cost"])
+        vals = (o["loss_new"], o["loss_old"], o["sparse_cost"],
+                o["ewc_cost"], o["delta_cost"])
         for key, v in zip(ema, vals):
             ema[key] = 0.98 * ema[key] + 0.02 * float(v.detach())
 
@@ -477,12 +485,14 @@ def main() -> None:
                 "loss_new": float(o["loss_new"].detach()),
                 "loss_old": float(o["loss_old"].detach()),
                 "sparse_cost": float(o["sparse_cost"].detach()),
+                "ewc_cost": float(o["ewc_cost"].detach()),
                 "delta_cost": float(o["delta_cost"].detach()),
                 **{k: round(v, 4) for k, v in stats.items()},
             })
             print(f"step {step:5d}/{m.steps}  L_new={ema['L_new']:.4f} "
                   f"L_old={ema['L_old']:.4f}  sp={ema['sparse']:.4f} "
-                  f"dW={ema['delta']:.5f}  | mask mean={stats['mask_mean']:.3f} "
+                  f"ewc={ema['ewc']:.4f} dW={ema['delta']:.5f}  "
+                  f"| mask mean={stats['mask_mean']:.3f} "
                   f"min={stats['mask_min']:.3f} max={stats['mask_max']:.3f} "
                   f"<0.1:{stats['frac_lt_0.1']:.2f} >0.9:{stats['frac_gt_0.9']:.2f}")
 
