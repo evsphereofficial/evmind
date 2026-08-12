@@ -123,41 +123,6 @@ class HRMIntentGovernor(nn.Module):
             with torch.no_grad():
                 self.mlp[-1].bias.fill_(b)
 
-    # -- feature assembly ----------------------------------------------------
-    def _weight_feats(
-        self,
-        p: torch.Tensor,           # flat per-group params (detached ok)
-        g: torch.Tensor,           # flat per-group grads (detached ok)
-        group_idx: int,
-        global_feats: torch.Tensor,
-    ) -> torch.Tensor:
-        n = p.numel()
-        idx = torch.arange(n, device=p.device, dtype=torch.float32)
-        idx_frac = idx / max(n, 1)
-        onehot = torch.zeros(n, self.num_groups, device=p.device)
-        onehot[:, group_idx] = 1.0
-        ctx = global_feats.unsqueeze(0).expand(n, -1)
-        return torch.cat([
-            torch.log1p(g.abs() + 1e-12).unsqueeze(-1),
-            torch.log1p(p.abs() + 1e-12).unsqueeze(-1),
-            idx_frac.unsqueeze(-1),
-            onehot,
-            ctx,
-        ], dim=-1)
-
-    def _module_feats(
-        self, p: torch.Tensor, g: torch.Tensor, global_feats: torch.Tensor
-    ) -> torch.Tensor:
-        eps = 1e-8
-        return torch.cat([
-            g.abs().mean().unsqueeze(0),
-            p.abs().mean().unsqueeze(0),
-            (g * p).abs().mean().unsqueeze(0),
-            torch.log1p(g.abs().mean()).unsqueeze(0),
-            torch.log1p((g ** 2).mean()).unsqueeze(0),
-            global_feats,
-        ], dim=0).unsqueeze(0)
-
     # -- main API -------------------------------------------------------------
     def gate(
         self,
@@ -167,24 +132,64 @@ class HRMIntentGovernor(nn.Module):
     ) -> list[torch.Tensor]:
         """Return one gate tensor per group, shapes matching p_list.
 
-        p_list/g_list: current parameters and raw gradients per group.
+        Fully vectorized over all controlled weights (single MLP pass;
+        per-group python loops were a major runtime bottleneck).
         """
-        masks = []
-        prev_mean = torch.full((1,), self.mlp[-1].bias.detach().sigmoid()
-                               if hasattr(self.mlp[-1], "bias")
-                               else 0.5, device=p_list[0].device)
-        for i, (p, g) in enumerate(zip(p_list, g_list)):
-            if self.granularity == "weight":
-                feats = self._weight_feats(p, g, i, global_feats)
-            else:
-                feats = self._module_feats(p, g, global_feats)
-            for _ in range(self.refine_steps):
-                gate_logit = self.mlp(torch.cat([
-                    feats, prev_mean.expand(feats.shape[0], -1)], dim=-1))
-                m = torch.sigmoid(gate_logit).squeeze(-1)
-                prev_mean = m.mean().reshape(1)
-            masks.append(m)
-        return masks
+        sizes = [p.numel() for p in p_list]
+        G = len(sizes)
+        N = sum(sizes)
+        p_all = torch.cat([p.flatten() for p in p_list])
+        g_all = torch.cat([g.flatten() for g in g_list])
+
+        gids = torch.repeat_interleave(torch.arange(G, device=p_all.device),
+                                       torch.tensor(sizes, device=p_all.device))
+        local_idx = torch.arange(N, device=p_all.device) - torch.cumsum(
+            torch.tensor([0] + sizes, device=p_all.device)[:-1], 0)[gids]
+        idx_frac = local_idx / torch.tensor(sizes, device=p_all.device)[gids].float()
+
+        if self.granularity == "weight":
+            onehot = torch.nn.functional.one_hot(gids, num_classes=G).float()
+            ctx = global_feats.unsqueeze(0).expand(N, -1)
+            feats = torch.cat([
+                torch.log1p(g_all.abs() + 1e-12).unsqueeze(-1),
+                torch.log1p(p_all.abs() + 1e-12).unsqueeze(-1),
+                idx_frac.unsqueeze(-1),
+                onehot,
+                ctx,
+            ], dim=-1)
+        else:
+            # module-level: segment-reduced stats per group (vectorized)
+            counts = torch.zeros(G, device=p_all.device)
+            counts.scatter_add_(0, gids, torch.ones_like(p_all))
+            absg = torch.zeros(G, device=p_all.device)
+            absg.scatter_add_(0, gids, g_all.abs())
+            absp = torch.zeros(G, device=p_all.device)
+            absp.scatter_add_(0, gids, p_all.abs())
+            abgp = torch.zeros(G, device=p_all.device)
+            abgp.scatter_add_(0, gids, (g_all * p_all).abs())
+            gsq = torch.zeros(G, device=p_all.device)
+            gsq.scatter_add_(0, gids, g_all ** 2)
+            feats = torch.cat([
+                (absg / counts).unsqueeze(-1),
+                (absp / counts).unsqueeze(-1),
+                (abgp / counts).unsqueeze(-1),
+                torch.log1p(absg / counts).unsqueeze(-1),
+                torch.log1p(gsq / counts).unsqueeze(-1),
+                global_feats.unsqueeze(0).expand(G, -1),
+            ], dim=-1)
+
+        init_bias = self.mlp[-1].bias.detach().sigmoid() \
+            if hasattr(self.mlp[-1], "bias") else 0.5
+        prev_mean = torch.full((1,), float(init_bias), device=p_all.device)
+        for _ in range(self.refine_steps):
+            gate_logit = self.mlp(torch.cat([
+                feats, prev_mean.expand(feats.shape[0], -1)], dim=-1))
+            m = torch.sigmoid(gate_logit).squeeze(-1)
+            prev_mean = m.mean().reshape(1)
+
+        if self.granularity == "weight":
+            return torch.split(m, list(sizes))
+        return torch.split(m.unsqueeze(-1), [1] * G)
 
     def gate_from_model(
         self,
@@ -238,7 +243,7 @@ class HRMIntentGovernor(nn.Module):
 
 def mask_stats(masks: list[torch.Tensor]) -> dict[str, float]:
     """Aggregate gate diagnostics: mean/std/min/max and decisive fractions."""
-    m = torch.cat([mi.flatten() for mi in masks])
+    m = torch.cat([mi.detach().flatten() for mi in masks])
     return {
         "mask_mean": float(m.mean()),
         "mask_std": float(m.std()),

@@ -64,10 +64,11 @@ class MetaConfig:
         L = L_new + lambda_old*L_old + lambda_sparse*mean(M)
             + lambda_delta*mean(|dW|/|W|)
     """
-    steps: int = 900            # governor optimizer updates
+    steps: int = 400            # governor optimizer updates
     meta_batch: int = 8         # parallel meta-steps per update (GPU utilization)
     batch_size: int = 512       # meta task batch
     warmup_batches: int = 20    # plain updates on task A so it is well installed
+    warmup_lr: float = 2e-3     # warmup lr (faster knowledge install than burst lr)
     burst_steps: int = 20       # gated updates on task B per meta step
     lr: float = 1e-3            # governor learning rate + masked update scale
     lambda_old: float = 1.0     # weight of old-task degradation penalty

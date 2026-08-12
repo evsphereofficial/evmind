@@ -77,6 +77,19 @@ def _sample_batch(n: int, seed_offset: int = 0) -> torch.Tensor:
     return torch.rand(n, 2, generator=gen) * 2.0 - 1.0
 
 
+def sample_chunk(
+    n_batches: int, n: int, seed_base: int, device: torch.device
+) -> torch.Tensor:
+    """All batches of a phase in ONE generator call + ONE transfer (GPU-width).
+
+    Deterministic per (n_batches, n, seed_base); the exact draws differ from
+    the previous step-by-step scheme (same seeds, different splitting).
+    Returns (n_batches * n, 2) on the target device.
+    """
+    x = _sample_batch(n_batches * n, seed_offset=seed_base)
+    return x.to(device)
+
+
 def make_meta_task(rng: torch.Generator) -> tuple[str, int, float]:
     """Pick (family_name, kind, boundary_param) for a meta task."""
     families = ["horizontal", "vertical", "circle", "diagonal", "xor"]
@@ -129,9 +142,11 @@ def gated_burst(
     """
     mask_log: list[dict] = []
     gate_means = []
+    xb = sample_chunk(steps, batch_size, seed_base, device)
+    yb = meta_task_labels(xb, task)
     for s in range(steps):
-        x = _sample_batch(batch_size, seed_offset=seed_base + s).to(device)
-        y = meta_task_labels(x, task).to(device)
+        x = xb[s * batch_size:(s + 1) * batch_size]
+        y = yb[s * batch_size:(s + 1) * batch_size]
         pred = functional_call(model, p_cur, (x,))
         loss = BCE(pred, y)
 
@@ -167,9 +182,11 @@ def warmup_batches(
 ) -> None:
     """Plain (ungated) training on task A until it is well installed."""
     opt = torch.optim.AdamW(model.parameters(), lr=lr)
+    xb = sample_chunk(n_batches, batch_size, seed_base, device)
+    yb = meta_task_labels(xb, task)
     for k in range(n_batches):
-        x = _sample_batch(batch_size, seed_offset=seed_base + k).to(device)
-        y = meta_task_labels(x, task).to(device)
+        x = xb[k * batch_size:(k + 1) * batch_size]
+        y = yb[k * batch_size:(k + 1) * batch_size]
         loss = BCE(model(x), y)
         opt.zero_grad(set_to_none=True)
         loss.backward()
@@ -197,6 +214,7 @@ def meta_step(
     """
     m = config.meta
     base_lr = m.lr
+    warmup_lr = getattr(m, "warmup_lr", m.lr)
     bsize = m.batch_size
 
     torch.manual_seed(100_000 + seed_off * 7)
@@ -204,7 +222,7 @@ def meta_step(
     fam_a = make_meta_task(rng)
     fam_b = make_meta_task(rng)
 
-    warmup_batches(model, fam_a, m.warmup_batches, bsize, base_lr,
+    warmup_batches(model, fam_a, m.warmup_batches, bsize, warmup_lr,
                    seed_base=seed_off * 31, device=device)
     model.zero_grad(set_to_none=True)
 
@@ -272,6 +290,7 @@ def meta_evaluate(
     """For each pair (A, B): warm up A, burst on B gated or ungated, measure."""
     m = config.meta
     base_lr = m.lr
+    warmup_lr = getattr(m, "warmup_lr", m.lr)
     bsize = m.batch_size
 
     rows = []
@@ -281,7 +300,7 @@ def meta_evaluate(
         fam_a = make_meta_task(rng)
         fam_b = make_meta_task(rng)
 
-        warmup_batches(model, fam_a, m.warmup_batches, bsize, base_lr,
+        warmup_batches(model, fam_a, m.warmup_batches, bsize, warmup_lr,
                        seed_base=p * 131, device=device)
         model.zero_grad(set_to_none=True)
 
