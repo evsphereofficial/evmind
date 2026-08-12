@@ -61,18 +61,21 @@ class MetaConfig:
     """Meta-pretraining of the intent network (trained first, then frozen).
 
     Objective (parameter modification is itself expensive):
-        L = L_new + lambda_old*L_old + lambda_sparse*mean(M)
+        L = L_new + lambda_old*L_old
+            + lambda_sparse*(mean(M)-sparse_target)^2   # selective, not zero
             + lambda_delta*mean(|dW|/|W|)
     """
-    steps: int = 250            # governor optimizer updates
+    steps: int = 200            # governor optimizer updates
     meta_batch: int = 8         # parallel meta-steps per update (GPU utilization)
     batch_size: int = 512       # meta task batch
     warmup_batches: int = 12    # plain updates on task A so it is well installed
     warmup_lr: float = 2e-3     # warmup lr (faster knowledge install than burst lr)
-    burst_steps: int = 15       # gated updates on task B per meta step
-    lr: float = 1e-3            # governor learning rate + masked update scale
+    burst_steps: int = 20       # gated updates on task B per meta step
+    lr: float = 1e-3            # governor optimizer learning rate
+    burst_lr: float = 2e-3      # masked update scale during the B burst
     lambda_old: float = 1.0     # weight of old-task degradation penalty
-    lambda_sparse: float = 0.05  # weight of mean(M) cost (fewer open gates)
+    lambda_sparse: float = 1.0  # weight of (mean(M)-sparse_target)^2
+    sparse_target: float = 0.3  # desired fraction of open gate mass
     lambda_delta: float = 0.5   # weight of mean relative |dW| (change cost)
     eval_pairs: int = 24        # paired gated-vs-ungated sanity check pairs
 

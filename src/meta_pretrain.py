@@ -213,7 +213,7 @@ def meta_step(
     plus scalar diagnostics.
     """
     m = config.meta
-    base_lr = m.lr
+    base_lr = m.burst_lr
     warmup_lr = getattr(m, "warmup_lr", m.lr)
     bsize = m.batch_size
 
@@ -253,7 +253,7 @@ def meta_step(
         rel_changes.append(rel.mean())
     mean_rel_change = torch.stack(rel_changes).mean()
 
-    sparse_cost = mean_gate
+    sparse_cost = (mean_gate - getattr(m, "sparse_target", 0.3)) ** 2
 
     # objective per user spec: parameter modification itself is expensive
     gov_loss = (
@@ -289,7 +289,7 @@ def meta_evaluate(
 ) -> tuple[pd.DataFrame, dict]:
     """For each pair (A, B): warm up A, burst on B gated or ungated, measure."""
     m = config.meta
-    base_lr = m.lr
+    base_lr = m.burst_lr
     warmup_lr = getattr(m, "warmup_lr", m.lr)
     bsize = m.batch_size
 
@@ -408,7 +408,8 @@ def main() -> None:
           f"totally controlled weights: {total_weights:,}")
     print(f"Granularity: {governor.granularity}  "
           f"governor params: {governor.governor_params():,}")
-    print(f"Objective: L_new + {m.lambda_old}*L_old + {m.lambda_sparse}*mean(M) "
+    print(f"Objective: L_new + {m.lambda_old}*L_old "
+          f"+ {m.lambda_sparse}*(mean(M)-{getattr(m, 'sparse_target', 0.3)})^2 "
           f"+ {m.lambda_delta}*mean(|dW|/|W|)")
     print(f"Meta-batching: {m.meta_batch} parallel steps per governor update, "
           f"{m.steps} updates, warmup={m.warmup_batches} burst={m.burst_steps} "
