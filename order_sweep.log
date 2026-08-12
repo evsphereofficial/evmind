@@ -1,0 +1,121 @@
+=== PERM 0 (vertical -> xor_quadrant -> diagonal -> circle -> horizontal) SEED 0 ===
+Peak RAM: 1430.92 MB
+============================================================
+Outputs written to results_orders/gov/p0_s0/
+=== PERM 0 (vertical -> xor_quadrant -> diagonal -> circle -> horizontal) SEED 1 ===
+Peak RAM: 1417.12 MB
+============================================================
+Outputs written to results_orders/gov/p0_s1/
+=== PERM 0 (vertical -> xor_quadrant -> diagonal -> circle -> horizontal) SEED 2 ===
+Peak RAM: 1420.75 MB
+============================================================
+Outputs written to results_orders/gov/p0_s2/
+=== PERM 1 (horizontal -> xor_quadrant -> circle -> diagonal -> vertical) SEED 0 ===
+Peak RAM: 1416.02 MB
+============================================================
+Outputs written to results_orders/gov/p1_s0/
+=== PERM 1 (horizontal -> xor_quadrant -> circle -> diagonal -> vertical) SEED 1 ===
+Peak RAM: 1415.94 MB
+============================================================
+Outputs written to results_orders/gov/p1_s1/
+=== PERM 1 (horizontal -> xor_quadrant -> circle -> diagonal -> vertical) SEED 2 ===
+Peak RAM: 1417.38 MB
+============================================================
+Outputs written to results_orders/gov/p1_s2/
+=== PERM 2 (vertical -> circle -> horizontal -> diagonal -> xor_quadrant) SEED 0 ===
+Peak RAM: 1430.25 MB
+============================================================
+Outputs written to results_orders/gov/p2_s0/
+=== PERM 2 (vertical -> circle -> horizontal -> diagonal -> xor_quadrant) SEED 1 ===
+Peak RAM: 1419.89 MB
+============================================================
+Outputs written to results_orders/gov/p2_s1/
+=== PERM 2 (vertical -> circle -> horizontal -> diagonal -> xor_quadrant) SEED 2 ===
+Peak RAM: 1419.8 MB
+============================================================
+Outputs written to results_orders/gov/p2_s2/
+=== PERM 3 (circle -> vertical -> diagonal -> horizontal -> xor_quadrant) SEED 0 ===
+Peak RAM: 1415.97 MB
+============================================================
+Outputs written to results_orders/gov/p3_s0/
+=== PERM 3 (circle -> vertical -> diagonal -> horizontal -> xor_quadrant) SEED 1 ===
+Peak RAM: 1420.6 MB
+============================================================
+Outputs written to results_orders/gov/p3_s1/
+=== PERM 3 (circle -> vertical -> diagonal -> horizontal -> xor_quadrant) SEED 2 ===
+Peak RAM: 1430.09 MB
+============================================================
+Outputs written to results_orders/gov/p3_s2/
+=== PERM 4 (circle -> vertical -> xor_quadrant -> diagonal -> horizontal) SEED 0 ===
+Peak RAM: 1416.17 MB
+============================================================
+Outputs written to results_orders/gov/p4_s0/
+=== PERM 4 (circle -> vertical -> xor_quadrant -> diagonal -> horizontal) SEED 1 ===
+Peak RAM: 1417.16 MB
+============================================================
+Outputs written to results_orders/gov/p4_s1/
+=== PERM 4 (circle -> vertical -> xor_quadrant -> diagonal -> horizontal) SEED 2 ===
+Peak RAM: 1416.02 MB
+============================================================
+Outputs written to results_orders/gov/p4_s2/
+=== PERM 5 (horizontal -> xor_quadrant -> diagonal -> vertical -> circle) SEED 0 ===
+Peak RAM: 1419.56 MB
+============================================================
+Outputs written to results_orders/gov/p5_s0/
+=== PERM 5 (horizontal -> xor_quadrant -> diagonal -> vertical -> circle) SEED 1 ===
+Peak RAM: 1417.52 MB
+============================================================
+Outputs written to results_orders/gov/p5_s1/
+=== PERM 5 (horizontal -> xor_quadrant -> diagonal -> vertical -> circle) SEED 2 ===
+Peak RAM: 1430.43 MB
+============================================================
+Outputs written to results_orders/gov/p5_s2/
+=== PERM 6 (diagonal -> horizontal -> vertical -> xor_quadrant -> circle) SEED 0 ===
+Peak RAM: 1420.59 MB
+============================================================
+Outputs written to results_orders/gov/p6_s0/
+=== PERM 6 (diagonal -> horizontal -> vertical -> xor_quadrant -> circle) SEED 1 ===
+Peak RAM: 1419.51 MB
+============================================================
+Outputs written to results_orders/gov/p6_s1/
+=== PERM 6 (diagonal -> horizontal -> vertical -> xor_quadrant -> circle) SEED 2 ===
+Peak RAM: 1430.33 MB
+============================================================
+Outputs written to results_orders/gov/p6_s2/
+=== PERM 7 (diagonal -> vertical -> xor_quadrant -> horizontal -> circle) SEED 0 ===
+Peak RAM: 1416.24 MB
+============================================================
+Outputs written to results_orders/gov/p7_s0/
+=== PERM 7 (diagonal -> vertical -> xor_quadrant -> horizontal -> circle) SEED 1 ===
+Peak RAM: 1430.35 MB
+============================================================
+Outputs written to results_orders/gov/p7_s1/
+=== PERM 7 (diagonal -> vertical -> xor_quadrant -> horizontal -> circle) SEED 2 ===
+Peak RAM: 1420.64 MB
+============================================================
+Outputs written to results_orders/gov/p7_s2/
+=== PERM 8 (xor_quadrant -> vertical -> horizontal -> diagonal -> circle) SEED 0 ===
+Peak RAM: 1417.52 MB
+============================================================
+Outputs written to results_orders/gov/p8_s0/
+=== PERM 8 (xor_quadrant -> vertical -> horizontal -> diagonal -> circle) SEED 1 ===
+Peak RAM: 1419.88 MB
+============================================================
+Outputs written to results_orders/gov/p8_s1/
+=== PERM 8 (xor_quadrant -> vertical -> horizontal -> diagonal -> circle) SEED 2 ===
+Peak RAM: 1420.7 MB
+============================================================
+Outputs written to results_orders/gov/p8_s2/
+=== PERM 9 (xor_quadrant -> diagonal -> vertical -> circle -> horizontal) SEED 0 ===
+Peak RAM: 1417.44 MB
+============================================================
+Outputs written to results_orders/gov/p9_s0/
+=== PERM 9 (xor_quadrant -> diagonal -> vertical -> circle -> horizontal) SEED 1 ===
+Peak RAM: 1415.78 MB
+============================================================
+Outputs written to results_orders/gov/p9_s1/
+=== PERM 9 (xor_quadrant -> diagonal -> vertical -> circle -> horizontal) SEED 2 ===
+Peak RAM: 1417.23 MB
+============================================================
+Outputs written to results_orders/gov/p9_s2/
+=== ORDER SWEEP COMPLETE ===

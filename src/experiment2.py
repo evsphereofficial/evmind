@@ -179,6 +179,9 @@ def main() -> None:
     parser.add_argument("--outdir", default=str(PROJECT_ROOT / "results_phase2"))
     parser.add_argument("--seed", type=int, default=None,
                         help="override the experiment seed (multi-seed verification)")
+    parser.add_argument("--order", type=str, default=None,
+                        help="comma-separated task order, a permutation of the "
+                             "config's task names (task-order robustness test)")
     parser.add_argument("--mode", choices=["mlp", "direct"], default="mlp",
                         help="mlp = shared gate network (phase 2); "
                              "direct = frozen one-gate-per-weight (phase 2b)")
@@ -191,6 +194,12 @@ def main() -> None:
     cfg = load_config(args.config)
     if args.seed is not None:
         cfg.train.seed = args.seed
+    if args.order is not None:
+        wanted = [n.strip() for n in args.order.split(",")]
+        by_name = {t.name: t for t in cfg.tasks}
+        if set(wanted) != set(by_name) or len(wanted) != len(by_name):
+            raise SystemExit(f"--order must be a permutation of {list(by_name)}, got {wanted}")
+        cfg.tasks = [by_name[n] for n in wanted]
     if args.memory_agg is not None:
         cfg.meta.memory_agg = args.memory_agg
     outdir = Path(args.outdir)

@@ -1,0 +1,11 @@
+perm	order
+0	vertical,xor_quadrant,diagonal,circle,horizontal
+1	horizontal,xor_quadrant,circle,diagonal,vertical
+2	vertical,circle,horizontal,diagonal,xor_quadrant
+3	circle,vertical,diagonal,horizontal,xor_quadrant
+4	circle,vertical,xor_quadrant,diagonal,horizontal
+5	horizontal,xor_quadrant,diagonal,vertical,circle
+6	diagonal,horizontal,vertical,xor_quadrant,circle
+7	diagonal,vertical,xor_quadrant,horizontal,circle
+8	xor_quadrant,vertical,horizontal,diagonal,circle
+9	xor_quadrant,diagonal,vertical,circle,horizontal

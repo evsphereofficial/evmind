@@ -1,0 +1,6 @@
+task,forgetting_phase1,forgetting_phase2,delta
+diagonal,49.05,48.85,-0.2
+horizontal,51.0,48.85,-2.15
+vertical,48.75,37.35,-11.4
+xor_quadrant,50.65,21.75,-28.9
+circle,0.0,0.0,0.0

@@ -1,0 +1,6 @@
+task,initial_accuracy,best_accuracy,final_accuracy,forgetting
+xor_quadrant,97.65,97.65,49.95,47.7
+vertical,98.65,98.65,50.35,48.3
+horizontal,99.9,99.9,44.15,55.75
+diagonal,98.75,98.75,46.55,52.2
+circle,95.35,95.35,95.35,0.0

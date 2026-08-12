@@ -115,11 +115,20 @@ def main() -> None:
     parser.add_argument("--outdir", default=str(PROJECT_ROOT / "results"))
     parser.add_argument("--seed", type=int, default=None,
                         help="override the experiment seed (multi-seed verification)")
+    parser.add_argument("--order", type=str, default=None,
+                        help="comma-separated task order, a permutation of the "
+                             "config's task names (task-order robustness test)")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
     if args.seed is not None:
         cfg.train.seed = args.seed
+    if args.order is not None:
+        wanted = [n.strip() for n in args.order.split(",")]
+        by_name = {t.name: t for t in cfg.tasks}
+        if set(wanted) != set(by_name) or len(wanted) != len(by_name):
+            raise SystemExit(f"--order must be a permutation of {list(by_name)}, got {wanted}")
+        cfg.tasks = [by_name[n] for n in wanted]
     outdir = Path(args.outdir)
     outdir.mkdir(parents=True, exist_ok=True)
     # Fresh run: clear previous artifacts so results/ mirrors the latest run.

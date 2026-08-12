@@ -8,6 +8,14 @@ Objective: L_new + 1.0*L_old + 1.0*(mean(M)-0.3)^2 + 0.3*mean(M*(gA_hat^2-1)) + 
 Meta-batching: 8 parallel steps per governor update, 390 updates, warmup=12 burst=3xadamw batch=512
 Old-knowledge memory: depth 0..2 tasks, agg='ewc' (I_mem = accumulated per-weight importance, g_mem = direction)
 
+step     1/390  L_new=0.0137 L_old=0.0108  sp=0.0008 ewc=0.0157 dW=0.03617  | mask mean=0.496 min=0.486 max=0.505 <0.1:0.00 >0.9:0.00
+step    50/390  L_new=0.4929 L_old=0.1662  sp=0.0116 ewc=0.2495 dW=0.99612  | mask mean=0.334 min=0.231 max=0.383 <0.1:0.00 >0.9:0.00
+step   100/390  L_new=0.6680 L_old=0.1986  sp=0.0263 ewc=0.1263 dW=0.69054  | mask mean=0.036 min=0.002 max=0.132 <0.1:1.00 >0.9:0.00
+step   150/390  L_new=0.7706 L_old=0.2460  sp=0.0604 ewc=0.0457 dW=0.27222  | mask mean=0.021 min=0.001 max=0.116 <0.1:1.00 >0.9:0.00
+step   200/390  L_new=0.7966 L_old=0.2929  sp=0.0735 ewc=0.0163 dW=0.11054  | mask mean=0.022 min=0.002 max=0.152 <0.1:1.00 >0.9:0.00
+step   250/390  L_new=0.8011 L_old=0.2870  sp=0.0782 ewc=0.0053 dW=0.05170  | mask mean=0.018 min=0.002 max=0.176 <0.1:1.00 >0.9:0.00
+step   300/390  L_new=0.7545 L_old=0.2835  sp=0.0798 ewc=0.0011 dW=0.03183  | mask mean=0.012 min=0.000 max=0.217 <0.1:1.00 >0.9:0.00
+step   350/390  L_new=0.7570 L_old=0.2620  sp=0.0802 ewc=-0.0004 dW=0.02775  | mask mean=0.020 min=0.002 max=0.358 <0.1:1.00 >0.9:0.00
 
 ============================================================
 GOVERNOR META-PRETRAINING COMPLETE
@@ -21,5 +29,5 @@ Pairs evaluated: 24
   new-task acc gated   : 65.93%
   new-task acc ungated : 73.49%
   new-task cost of protecting: -7.55%
-Training took 501s
+Training took 444s
 Saved governor to results_governor/governor_pretrained.pt
