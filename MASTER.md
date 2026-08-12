@@ -74,9 +74,98 @@ configs/baseline.yaml
 results/           # generated artifacts
 ```
 
-### Step 2 — Config + Data Layer (next)
+### Step 2 — Implementation + First Baseline Run (2026-08-12)
 
-(Log the implementation + any decisions here.)
+Implemented per spec §16:
+
+- `src/config.py` — YAML config schema (all hyperparameters per §8).
+- `src/tasks.py` — 5 tasks: horizontal, vertical, circle (r=0.55),
+  diagonal, xor_quadrant (spec §3). No task-ID anywhere.
+- `src/dataset.py` — procedural generation, independent train/eval seed
+  families (spec §2), 10k train / 2k test per task.
+- `src/model.py` — `TinyNumericTransformer`: per-coordinate linear projection
+  (x -> embedding), learned positional embedding, 2-layer TransformerEncoder
+  (d=32, heads=2, ff=64), mean pooling, 1-output head.
+  **Parameter count: 17,249 (< 100K target).**
+- `src/train.py` — plain `loss.backward()` / `optimizer.step()`, no replay,
+  no freezing, no adapters (spec §4, §10). Hook insertion points noted for
+  Phase 2 (before_update / after_forward / control_update / after_update,
+  spec §17) but NO controller implemented.
+- `src/evaluate.py`, `src/metrics.py` — eval loop + spec §6 forgetting math
+  (F_i = best_accuracy_i - final_accuracy_i).
+- `src/experiment.py` — orchestrates training Task i then evaluating ALL
+  previously learned tasks (spec §4 protocol), writes all §9 outputs
+  (run_config.json, task_accuracies.csv, forgetting.csv, training_log.csv,
+  accuracy_matrix.png, forgetting_curve.png, final_model.pt), prints the §9
+  summary, records parameter count / training time / latency / peak VRAM / RAM.
+
+Commit `350b6d2` — implementation. Run #1 executed on CUDA, 12.1 s total.
+
+**RESULT — Run #1 (seed=0, deterministic):**
+
+Accuracy matrix (%):  (rows = tasks, cols = after training phase)
+
+```
+                After T1   After T2   After T3   After T4   After T5
+Task 1 horiz       99.45      48.70      49.25      75.15      50.40
+Task 2 vert                  99.50      48.85      74.05      48.50
+Task 3 circle                         98.65      50.05      49.90
+Task 4 diag                                  99.10      48.45
+Task 5 xor                                          99.10
+```
+
+Forgetting:
+
+| Task | Initial | Best | Final | Forgetting |
+|------|--------:|-----:|------:|-----------:|
+| horizontal | 99.45 | 99.45 | 50.40 | 49.05 |
+| vertical | 99.50 | 99.50 | 48.50 | 51.00 |
+| circle | 98.65 | 98.65 | 49.90 | 48.75 |
+| diagonal | 99.10 | 99.10 | 48.45 | 50.65 |
+| xor_quadrant | 99.10 | 99.10 | 99.10 | 0.00 |
+
+- **Average forgetting: 39.89%** (49.86% over the 4 tasks that were actually
+  overwritten; the 5th task trivially forgets 0 because training ends).
+- **Final average accuracy: 59.27%** (≈ chance on 4 of 5 tasks).
+- Parameters: 17,249. Total training time: ~12 s. Peak VRAM: 22.3 MB.
+  Peak RAM: ~1.2 GB. Latency: ~0.0003 ms/sample.
+
+Scientific notes (honest observations, no tuning):
+
+1. **Catastrophic forgetting is strong and immediate** — single-task accuracy
+   collapses from ~99% to ~49% (chance) after ONE subsequent task, far worse
+   than the illustrative matrix in the spec (§5, which showed 99→81→63→51).
+   This is because the tasks share no aligned features and the Transformer
+   head/pooling re-wiring overwrites prior decision structure.
+2. **Task 4 (diagonal) partially re-teaches tasks 1 & 2** (75.15 / 74.05).
+   x1+x2>0 linearly combines the x1 and x2 features used by the horizontal
+   and vertical tasks, so diagonal training partially re-instantiates them —
+   classic interference, not a mechanism, but a useful baseline detail.
+3. **Task 5 (XOR) erases everything again** — XOR requires sign-combination
+   features that rewrite the earlier ones; all four old tasks drop to chance.
+4. The last task always shows 0 forgetting by construction (nothing trained
+   after it); the meaningful number for the future HRM comparison is
+   **~49.9% average forgetting over overwritten tasks**.
+
+Rerun with identical seed produced identical numbers → baseline reproducible.
+
+### Baseline Status
+
+**Phase 1 baseline is complete and reproducible.** Ordinary single-node live
+training of a 17K-parameter Transformer on 5 sequential synthetic tasks:
+each task is learned to ~99% and then **destroyed to chance (~49%) by the next
+task**. The catastrophic-forgetting failure mode is confirmed, honest, and
+unmistakable. This is the number Phase 2 (HRM-inspired controller) must beat.
+
+### Step 3 — To Do (Phase 2, RESERVED, DO NOT START)
+
+- HRM-inspired recursive controller (spec §11, §17): investigate
+  weight-update gates / masks / gradient scaling / block-level freeze,
+  and test empirically whether parameter-level control is needed or
+  layer/block/feature-level control suffices.
+- Compare: ordinary training vs controlled live training (§12).
+- Do not proceed to larger EvMind experiments until the retention question
+  is understood (§12).
 
 ---
 
@@ -92,5 +181,12 @@ results/           # generated artifacts
 
 ## Results (filled after first run)
 
-Placeholder — will be replaced by the computed accuracy matrix, forgetting
-table, and summary output of the first baseline run.
+Full results in `results/`. Summary (Run #1, seed=0, deterministic, reproducible):
+
+- Accuracy matrix, per-task forgetting, plots: see `results/`.
+- **Average forgetting: 39.89%** (49.86% over overwritten tasks 1–4).
+- **Final average accuracy: 59.27%.**
+- All four overwritten tasks end at chance (~49%), each was ~99% after its
+  own training phase.
+- Confirmed: catastrophic forgetting is immediate and severe for this
+  single-node baseline. See journal Step 2 for the full matrix and notes.

@@ -10,11 +10,11 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import resource
 import time
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import torch
 
@@ -60,7 +60,6 @@ def plot_accuracy_matrix(
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    import numpy as np
 
     arr = np.array(matrix, dtype=float)
     fig, ax = plt.subplots(figsize=(8, 6))
@@ -90,7 +89,6 @@ def plot_retention_curves(
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    import numpy as np
 
     arr = np.array(matrix, dtype=float)
     phases = np.arange(1, len(task_names) + 1)
@@ -212,8 +210,6 @@ def main() -> None:
         print()
 
     # --- Metrics -----------------------------------------------------------
-    import numpy as np
-
     mat = np.array(accuracy_matrix, dtype=float)
     metric = compute_forgetting(mat)
 
@@ -224,10 +220,10 @@ def main() -> None:
 
     df_forgetting = pd.DataFrame({
         "task": task_names,
-        "initial_accuracy": metric["initial"],
-        "best_accuracy": metric["best"],
-        "final_accuracy": metric["final"],
-        "forgetting": metric["forgetting"],
+        "initial_accuracy": np.round(metric["initial"], 4),
+        "best_accuracy": np.round(metric["best"], 4),
+        "final_accuracy": np.round(metric["final"], 4),
+        "forgetting": np.round(metric["forgetting"], 4),
     })
     df_forgetting.to_csv(outdir / "forgetting.csv", index=False)
 
@@ -272,9 +268,12 @@ def main() -> None:
         print(f"  Forgetting:       {metric['forgetting'][i]:.2f}%")
     print("\n" + "=" * 60)
     print(f"Average Forgetting: {metric['average_forgetting']:.2f}%")
+    overwritten = metric["forgetting"][:-1]
+    print(f"Average Forgetting (overwritten tasks 1..{num_tasks - 1}): "
+          f"{np.nanmean(overwritten):.2f}%")
     print(f"Final Average Accuracy: {metric['final_average_accuracy']:.2f}%")
     print(f"Total training time: {run_info['total_training_seconds']:.1f}s")
-    print(f"Inference latency: {latency_ms:.3f} ms/sample")
+    print(f"Inference latency: {latency_ms:.4f} ms/sample")
     if peak_vram_mb:
         print(f"Peak VRAM: {peak_vram_mb} MB")
     print(f"Peak RAM: {peak_ram_mb} MB")

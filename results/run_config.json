@@ -1,0 +1,70 @@
+{
+  "run_name": "baseline",
+  "config": {
+    "run_name": "baseline",
+    "train_samples": 10000,
+    "test_samples": 2000,
+    "tasks": [
+      {
+        "name": "horizontal",
+        "type": "horizontal",
+        "params": {}
+      },
+      {
+        "name": "vertical",
+        "type": "vertical",
+        "params": {}
+      },
+      {
+        "name": "circle",
+        "type": "circle",
+        "params": {
+          "r": 0.55
+        }
+      },
+      {
+        "name": "diagonal",
+        "type": "diagonal",
+        "params": {}
+      },
+      {
+        "name": "xor_quadrant",
+        "type": "xor",
+        "params": {}
+      }
+    ],
+    "model": {
+      "input_dim": 2,
+      "seq_len": 2,
+      "embedding_dim": 32,
+      "num_layers": 2,
+      "num_heads": 2,
+      "ff_dim": 64,
+      "dropout": 0.0
+    },
+    "train": {
+      "seed": 0,
+      "learning_rate": 0.001,
+      "batch_size": 128,
+      "epochs_per_task": 5,
+      "optimizer": "adamw",
+      "weight_decay": 0.0,
+      "num_workers": 0
+    }
+  },
+  "device": "cuda",
+  "parameter_count": 17249,
+  "training_time_seconds": {
+    "task1": 2.591,
+    "task2": 2.695,
+    "task3": 2.613,
+    "task4": 2.654,
+    "task5": 2.492
+  },
+  "total_training_seconds": 13.045,
+  "inference_latency_ms_per_sample": 0.00041610000016589765,
+  "peak_vram_mb": 22.32,
+  "peak_ram_mb": 1227.41,
+  "final_average_accuracy": 59.27,
+  "average_forgetting": 39.89
+}
