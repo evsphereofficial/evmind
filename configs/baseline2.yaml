@@ -66,9 +66,9 @@ meta:
   batch_size: 512
   warmup_batches: 12
   warmup_lr: 0.002
-  burst_steps: 20
+  burst_steps: 3
   lr: 0.001
-  burst_lr: 0.002
+  burst_lr: 0.03
   lambda_old: 1.0
   lambda_sparse: 1.0
   sparse_target: 0.3

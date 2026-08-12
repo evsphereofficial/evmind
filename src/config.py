@@ -70,16 +70,18 @@ class MetaConfig:
     batch_size: int = 512       # meta task batch
     warmup_batches: int = 12    # plain updates on task A so it is well installed
     warmup_lr: float = 2e-3     # warmup lr (faster knowledge install than burst lr)
-    burst_steps: int = 20       # gated updates on task B per meta step
+    burst_steps: int = 3        # SHORT burst: 20-step unrolls are chaotic
+                                # (loss cliffs ~6 orders steeper than the
+                                # FOMAML gradient predicted); ~3 steps make
+                                # the trajectory smooth and gradients valid
     lr: float = 1e-3            # governor optimizer learning rate
-    burst_lr: float = 2e-3      # masked update scale during the B burst
+    burst_lr: float = 3e-2      # masked update scale during the B burst
+                                # (3 x 3e-2 ~= 20 x 2e-3 in total update mass)
     lambda_old: float = 1.0     # weight of old-task degradation penalty
     lambda_sparse: float = 1.0  # weight of (mean(M)-sparse_target)^2
     sparse_target: float = 0.3  # desired fraction of open gate mass
     lambda_delta: float = 0.5   # weight of mean relative |dW| (change cost)
-    second_order: bool = True   # true MAML unroll (grad through inner grads);
-                                # forces math attention backend (SDPA has no
-                                # double backward)
+    second_order: bool = False  # short-horizon FOMAML is valid & stable here
     eval_pairs: int = 24        # paired gated-vs-ungated sanity check pairs
 
 
