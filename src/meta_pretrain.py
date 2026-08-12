@@ -46,7 +46,9 @@ from torch.func import functional_call
 
 from .config import load_config
 from .experiment import set_seed
-from .hrm import build_module_groups, HRMIntentGovernor, mask_stats
+from .hrm import (
+    build_module_groups, DirectGateGovernor, HRMIntentGovernor, mask_stats,
+)
 from .model import TinyNumericTransformer
 
 HERE = Path(__file__).resolve().parent
@@ -415,6 +417,9 @@ def main() -> None:
                         help="plasticity budget: desired mean(M) (Pareto sweep)")
     parser.add_argument("--steps", type=int, default=None,
                         help="override governor optimizer update count")
+    parser.add_argument("--mode", choices=["mlp", "direct"], default="mlp",
+                        help="mlp = shared gate network (phase 2); "
+                             "direct = one trainable gate per weight (phase 2b)")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
@@ -460,6 +465,9 @@ def main() -> None:
         refine_steps=cfg.governor.refine_steps,
         init_mask=cfg.governor.init_mask,
     ).to(device)
+    if args.mode == "direct":
+        governor = DirectGateGovernor(
+            groups, init_mask=cfg.governor.init_mask).to(device)
     m = cfg.meta
 
     print("=" * 60)
@@ -467,7 +475,7 @@ def main() -> None:
     print("=" * 60)
     print(f"Base model params: {model.count_parameters():,}  "
           f"totally controlled weights: {total_weights:,}")
-    print(f"Granularity: {governor.granularity}  "
+    print(f"Mode: {args.mode}  "
           f"governor params: {governor.governor_params():,}")
     print(f"Objective: L_new + {m.lambda_old}*L_old "
           f"+ {m.lambda_sparse}*(mean(M)-{getattr(m, 'sparse_target', 0.3)})^2 "
@@ -537,7 +545,8 @@ def main() -> None:
         "governor_params": governor.governor_params(),
         "base_params": model.count_parameters(),
         "controlled_weights": total_weights,
-        "granularity": governor.granularity,
+        "granularity": governor.granularity if hasattr(governor, "granularity") else "weight",
+        "mode": args.mode,
         "group_names": [g.name for g in groups],
         "objective": {"lambda_old": m.lambda_old, "lambda_sparse": m.lambda_sparse,
                       "sparse_target": m.sparse_target,
@@ -556,7 +565,8 @@ def main() -> None:
     print("GOVERNOR META-PRETRAINING COMPLETE")
     print("=" * 60)
     print(f"Governor params: {info['governor_params']:,} controlling "
-          f"{total_weights:,} weights ({governor.granularity}-level)")
+          f"{total_weights:,} weights "
+          f"({getattr(governor, 'granularity', args.mode)}-level)")
     print(f"Pairs evaluated: {summary['pairs']}")
     print(f"  old-task acc BEFORE B burst : {summary['acc_a_before_mean']:.2%}")
     print(f"  old-task acc AFTER  gated   : {summary['acc_a_gated_mean']:.2%}")

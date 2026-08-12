@@ -30,7 +30,8 @@ from .dataset import generate_dataset
 from .evaluate import evaluate
 from .experiment import make_optimizer, plot_accuracy_matrix, set_seed
 from .hrm import (
-    build_module_groups, HRMController, HRMIntentGovernor, mask_stats,
+    build_module_groups, DirectGateGovernor, HRMController,
+    HRMIntentGovernor, mask_stats,
     measure_rel_change, measure_update_fraction,
 )
 from .metrics import compute_forgetting
@@ -168,6 +169,9 @@ def main() -> None:
     parser.add_argument("--outdir", default=str(PROJECT_ROOT / "results_phase2"))
     parser.add_argument("--seed", type=int, default=None,
                         help="override the experiment seed (multi-seed verification)")
+    parser.add_argument("--mode", choices=["mlp", "direct"], default="mlp",
+                        help="mlp = shared gate network (phase 2); "
+                             "direct = frozen one-gate-per-weight (phase 2b)")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
@@ -208,13 +212,17 @@ def main() -> None:
     num_params = model.count_parameters()
 
     groups = build_module_groups(model)
-    governor = HRMIntentGovernor(
-        num_groups=len(groups),
-        granularity=cfg.governor.granularity,
-        hidden_dim=cfg.governor.hidden_dim,
-        refine_steps=cfg.governor.refine_steps,
-        init_mask=cfg.governor.init_mask,
-    ).to(device)
+    if args.mode == "direct":
+        governor = DirectGateGovernor(
+            groups, init_mask=cfg.governor.init_mask).to(device)
+    else:
+        governor = HRMIntentGovernor(
+            num_groups=len(groups),
+            granularity=cfg.governor.granularity,
+            hidden_dim=cfg.governor.hidden_dim,
+            refine_steps=cfg.governor.refine_steps,
+            init_mask=cfg.governor.init_mask,
+        ).to(device)
     governor.load_state_dict(torch.load(args.governor, map_location=device))
     governor.eval()  # FROZEN governance core (§132.3): no grads, no updates
     controller = HRMController(governor, groups, device)
@@ -228,7 +236,8 @@ def main() -> None:
     print(f"Base model parameters: {num_params:,}  (identical to Phase 1)")
     print(f"Governor (frozen intent net): {governor.governor_params():,} params "
           f"controlling {sum(g.size for g in groups):,} weights "
-          f"({governor.granularity}-level, {len(groups)} modules)")
+          f"({getattr(governor, 'granularity', args.mode)}-level, "
+          f"{len(groups)} modules)")
     print(f"Governor file: {args.governor}\n")
 
     # --- continual stream (same protocol as Phase 1) -------------------------
@@ -313,7 +322,7 @@ def main() -> None:
         "parameter_count": num_params,
         "governor_params": governor.governor_params(),
         "num_groups": len(groups),
-        "granularity": governor.granularity,
+        "granularity": getattr(governor, "granularity", args.mode),
         "training_time_seconds": {f"task{i+1}": round(t, 3) for i, t in train_times.items()},
         "total_training_seconds": round(sum(train_times.values()), 3),
         "inference_latency_ms_per_sample": latency_ms,

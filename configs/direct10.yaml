@@ -1,0 +1,77 @@
+# EvMind Phase 2 — HRM-governed live learning (single node).
+# Same base model + same task protocol as Phase 1 (results/baseline.yaml),
+# plus the tiny HRM intent network that is TRAINED FIRST (src/meta_pretrain.py)
+# and then frozen during the measured continual stream (src/experiment2.py).
+
+run_name: phase2_hrm
+
+# Dataset sizes per task (identical to Phase 1 run).
+train_samples: 10000
+test_samples: 2000
+
+# The SAME five sequential tasks as Phase 1 (same boundaries, no task-ID).
+tasks:
+  - name: horizontal   # y > 0
+    type: horizontal
+  - name: vertical     # x > 0
+    type: vertical
+  - name: circle       # x^2 + y^2 > r^2
+    type: circle
+    params:
+      r: 0.55
+  - name: diagonal     # x + y > 0
+    type: diagonal
+  - name: xor_quadrant # (x > 0) != (y > 0)
+    type: xor
+
+# Base model: IDENTICAL architecture to Phase 1 (17,249 params).
+model:
+  input_dim: 2
+  seq_len: 2
+  embedding_dim: 32
+  num_layers: 2
+  num_heads: 2
+  ff_dim: 64
+  dropout: 0.0
+
+# Training protocol: identical to Phase 1 (AdamW, same lr/batch/epochs).
+train:
+  seed: 0
+  learning_rate: 0.001
+  batch_size: 128
+  epochs_per_task: 5
+  optimizer: adamw
+  weight_decay: 0.0
+  num_workers: 0
+
+# Tiny HRM intent network (learning governor) - architecture_v2.md section 132.
+# Granularity "weight": ONE learned gate per parameter (17,249 gates for the
+# 17K base model), produced by a tiny shared gate network. The governor is
+# trained first (below), then frozen during the measured stream.
+governor:
+  hidden_dim: 24
+  refine_steps: 2
+  init_mask: 0.5
+  granularity: weight
+
+# First stage: meta-pretrain the intent network on the same geometry families
+# with randomized boundary shifts (disclosed in MASTER.md).
+#
+# Objective - parameter modification itself is expensive:
+#   L = L_new + lambda_old*L_old + lambda_sparse*mean(M) + lambda_delta*mean(|dW|/|W|)
+#   so the governor must learn selective plasticity, not "update everything".
+meta:
+  steps: 200
+  meta_batch: 8
+  batch_size: 512
+  warmup_batches: 12
+  warmup_lr: 0.002
+  burst_steps: 3
+  lr: 0.001
+  burst_lr: 0.03
+  lambda_old: 1.0
+  lambda_sparse: 20.0
+  sparse_target: 0.3
+  lambda_ewc: 0.05
+  lambda_delta: 0.5
+  eval_pairs: 24

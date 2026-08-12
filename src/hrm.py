@@ -274,8 +274,68 @@ class HRMIntentGovernor(nn.Module):
         return -(m * torch.log(m) + (1 - m) * torch.log(1 - m)).mean()
 
 
+class DirectGateGovernor(nn.Module):
+    """Phase 2b: ONE trainable gate per weight, no shared network.
+
+    The decisive 'WHERE' test: 17,249 free logits, each learning its own
+    gate against the same 3-step smooth meta-objective. Each gate integrates
+    its own per-weight harm/benefit signal over the meta trajectories --
+    the shared-MLP bottleneck (features -> one mapping for ALL weights) is
+    removed. If a selective solution exists, these gates can find it.
+
+    At stream time the gates are FROZEN static masks per weight (the
+    learned soft-mask regime; importance is LEARNED here, not FIM-computed).
+    """
+
+    def __init__(self, groups: list[ParamGroup], init_mask: float = 0.3) -> None:
+        super().__init__()
+        self.sizes = [g.size for g in groups]
+        b = math.log(init_mask / (1.0 - init_mask))
+        self.logits = nn.Parameter(torch.full((sum(self.sizes),), b))
+
+    def _masks(self, differentiable: bool) -> list[torch.Tensor]:
+        m = torch.sigmoid(self.logits)
+        if not differentiable:
+            m = m.detach()
+        return list(m.split(self.sizes))
+
+    def gate_from_state(
+        self,
+        p_cur=None,
+        g_list=None,
+        groups=None,
+        x=None,
+        y=None,
+        loss=None,
+        device=None,
+        differentiable: bool = True,
+        g_old_list=None,
+        hist_list=None,
+    ) -> list[torch.Tensor]:
+        """Same interface as HRMIntentGovernor; state inputs are ignored."""
+        return self._masks(differentiable)
+
+    def gate_from_model(
+        self,
+        model=None,
+        groups=None,
+        x=None,
+        y=None,
+        loss=None,
+        device=None,
+        g_old_list=None,
+        hist_list=None,
+    ) -> list[torch.Tensor]:
+        return self._masks(differentiable=False)
+
+    def total_masks(self, groups: list[ParamGroup]) -> int:
+        return sum(self.sizes)
+
+    def governor_params(self) -> int:
+        return self.logits.numel()
+
+
 def mask_stats(masks: list[torch.Tensor]) -> dict[str, float]:
-    """Aggregate gate diagnostics: mean/std/min/max and decisive fractions."""
     m = torch.cat([mi.detach().flatten() for mi in masks])
     return {
         "mask_mean": float(m.mean()),
