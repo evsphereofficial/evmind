@@ -68,6 +68,7 @@ def capture_sensitivity(
         xs, ys = cached
     model.zero_grad(set_to_none=True)
     loss = loss_fn(model(xs), ys)
+    loss.backward()  # sensitivity: grad of this task's loss w.r.t. CURRENT
     g_t = [g.param.grad.detach().clone() for g in groups]
     model.zero_grad(set_to_none=True)
     return g_t

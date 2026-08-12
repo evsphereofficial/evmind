@@ -1,0 +1,117 @@
+{
+  "run_name": "phase2_hrm",
+  "config": {
+    "run_name": "phase2_hrm",
+    "train_samples": 10000,
+    "test_samples": 2000,
+    "tasks": [
+      {
+        "name": "horizontal",
+        "type": "horizontal",
+        "params": {}
+      },
+      {
+        "name": "vertical",
+        "type": "vertical",
+        "params": {}
+      },
+      {
+        "name": "circle",
+        "type": "circle",
+        "params": {
+          "r": 0.55
+        }
+      },
+      {
+        "name": "diagonal",
+        "type": "diagonal",
+        "params": {}
+      },
+      {
+        "name": "xor_quadrant",
+        "type": "xor",
+        "params": {}
+      }
+    ],
+    "model": {
+      "input_dim": 2,
+      "seq_len": 2,
+      "embedding_dim": 32,
+      "num_layers": 2,
+      "num_heads": 2,
+      "ff_dim": 64,
+      "dropout": 0.0
+    },
+    "train": {
+      "seed": 0,
+      "learning_rate": 0.001,
+      "batch_size": 128,
+      "epochs_per_task": 5,
+      "optimizer": "adamw",
+      "weight_decay": 0.0,
+      "num_workers": 0
+    },
+    "governor": {
+      "hidden_dim": 24,
+      "refine_steps": 2,
+      "init_mask": 0.5,
+      "granularity": "weight"
+    },
+    "meta": {
+      "steps": 200,
+      "meta_batch": 8,
+      "batch_size": 512,
+      "warmup_batches": 12,
+      "warmup_lr": 0.002,
+      "burst_steps": 3,
+      "lr": 0.001,
+      "burst_lr": 0.03,
+      "lambda_old": 1.0,
+      "lambda_sparse": 1.0,
+      "sparse_target": 0.3,
+      "lambda_ewc": 0.05,
+      "lambda_delta": 0.5,
+      "second_order": false,
+      "eval_pairs": 24,
+      "old_tasks_max": 2,
+      "memory_agg": "ewc"
+    }
+  },
+  "device": "cuda",
+  "parameter_count": 17249,
+  "governor_params": 1777,
+  "num_groups": 29,
+  "granularity": "weight",
+  "memory": {
+    "agg": "ewc",
+    "tasks_captured": 5
+  },
+  "training_time_seconds": {
+    "task1": 4.904,
+    "task2": 4.097,
+    "task3": 4.286,
+    "task4": 4.323,
+    "task5": 4.763
+  },
+  "total_training_seconds": 22.373,
+  "inference_latency_ms_per_sample": 0.0004589380005199928,
+  "peak_vram_mb": 37.11,
+  "peak_ram_mb": 1416.19,
+  "final_average_accuracy": 59.11999999999999,
+  "average_forgetting": 39.160000000000004,
+  "average_forgetting_overwritten": 48.95,
+  "update_fractions": {
+    "task1": 99.64635631051075,
+    "task2": 99.2347382456954,
+    "task3": 97.93611223839063,
+    "task4": 99.13618180764102,
+    "task5": 98.90428430633659
+  },
+  "mean_rel_changes": {
+    "task1": 1087609.299854756,
+    "task2": 1.2308331177216665,
+    "task3": 4.941091474659484,
+    "task4": 1.3379702815978691,
+    "task5": 1.295010903689625
+  }
+}
