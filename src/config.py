@@ -77,6 +77,9 @@ class MetaConfig:
     lambda_sparse: float = 1.0  # weight of (mean(M)-sparse_target)^2
     sparse_target: float = 0.3  # desired fraction of open gate mass
     lambda_delta: float = 0.5   # weight of mean relative |dW| (change cost)
+    second_order: bool = True   # true MAML unroll (grad through inner grads);
+                                # forces math attention backend (SDPA has no
+                                # double backward)
     eval_pairs: int = 24        # paired gated-vs-ungated sanity check pairs
 
 

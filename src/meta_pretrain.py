@@ -135,6 +135,8 @@ def gated_burst(
     device: torch.device,
     differentiable: bool,
     ungated: bool = False,
+    g_old: list[torch.Tensor] | None = None,
+    second_order: bool = False,
 ) -> tuple[dict[str, torch.Tensor], list[dict], float]:
     """Unroll `steps` governor-gated updates on `task`.
 
@@ -152,14 +154,14 @@ def gated_burst(
 
         grad_list = torch.autograd.grad(
             loss, [p_cur[g.name] for g in groups],
-            create_graph=False, allow_unused=False)
+            create_graph=second_order, allow_unused=False)
 
         if ungated:
             masks = [torch.ones_like(p_cur[g.name].flatten()) for g in groups]
         else:
             masks = governor.gate_from_state(
                 p_cur, grad_list, groups, x, y, loss, device,
-                differentiable=differentiable)
+                differentiable=differentiable, g_old_list=g_old)
 
         mask_log.append(mask_stats(masks))
         gate_means.append(torch.cat([m.flatten() for m in masks]).mean())
@@ -232,10 +234,21 @@ def meta_step(
     p0 = {g.name: t.detach().clone() for g, t in zip(groups, [p_cur[g.name]
                                                               for g in groups])}
 
+    # pre-burst OLD-task sensitivity: grad of L_A w.r.t. pre-burst params
+    # (the EWC-diagonal importance measure; per-weight feature for the
+    # governor so selective gating is directly learnable)
+    x_as = _sample_batch(bsize, seed_offset=seed_off * 45 + 13).to(device)
+    y_as = meta_task_labels(x_as, fam_a).to(device)
+    aloss = BCE(functional_call(model, p_cur, (x_as,)), y_as)
+    g_old = torch.autograd.grad(
+        aloss, [p_cur[g.name] for g in groups],
+        create_graph=False, allow_unused=False)
+
     p_cur, mask_log, mean_gate = gated_burst(
         model, governor, groups, p_cur, fam_b,
         lr=base_lr, steps=m.burst_steps, batch_size=bsize,
-        seed_base=seed_off * 37 + 5, device=device, differentiable=True)
+        seed_base=seed_off * 37 + 5, device=device, differentiable=True,
+        g_old=g_old, second_order=m.second_order)
 
     x_av = _sample_batch(bsize, seed_offset=seed_off * 41 + 9).to(device)
     y_av = meta_task_labels(x_av, fam_a).to(device)
@@ -312,10 +325,17 @@ def meta_evaluate(
         # ---- gated burst (frozen governor) ----
         p_g = {g.name: g.param.detach().clone().requires_grad_(True)
                for g in groups}
+        x_as = _sample_batch(bsize, seed_offset=p * 161).to(device)
+        y_as = meta_task_labels(x_as, fam_a).to(device)
+        aloss = BCE(functional_call(model, p_g, (x_as,)), y_as)
+        g_old = torch.autograd.grad(
+            aloss, [p_g[g.name] for g in groups],
+            create_graph=False, allow_unused=False)
         p_g, _, _ = gated_burst(
             model, governor, groups, p_g, fam_b,
             lr=base_lr, steps=m.burst_steps, batch_size=bsize,
-            seed_base=p * 157 + 5, device=device, differentiable=False)
+            seed_base=p * 157 + 5, device=device, differentiable=False,
+            g_old=g_old)
         with torch.no_grad():
             pred_a = functional_call(model, p_g, (xa_te,))
             acc_a_gated = (pred_a > 0).float().eq(ya_te).float().mean().item()
@@ -377,6 +397,11 @@ def main() -> None:
 
     set_seed(cfg.train.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if getattr(cfg.meta, "second_order", False):
+        # true MAML unroll needs the gradient of the inner gradients;
+        # efficient SDPA backends have no double backward -> math attention
+        torch.backends.cuda.enable_flash_sdp(False)
+        torch.backends.cuda.enable_mem_efficient_sdp(False)
     torch.backends.cudnn.benchmark = True  # speed over strict determinism
     print(f"Device: {device}")
 

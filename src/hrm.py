@@ -97,7 +97,8 @@ class HRMIntentGovernor(nn.Module):
         refine_steps: int = 2,
         init_mask: float = 0.5,
         global_feat_dim: int = 9,
-        per_weight_feat_dim: int = 2,   # log1p|g|, log1p|p| (position+onehot appended)
+        per_weight_feat_dim: int = 4,
+        # log1p|g|, log1p|p|, log1p|g_old|, log1p(g*g_old)+ (pos+onehot appended)
     ) -> None:
         super().__init__()
         assert granularity in ("weight", "module")
@@ -129,8 +130,14 @@ class HRMIntentGovernor(nn.Module):
         p_list: list[torch.Tensor],
         g_list: list[torch.Tensor],
         global_feats: torch.Tensor,
+        g_old_list: list[torch.Tensor] | None = None,
     ) -> list[torch.Tensor]:
         """Return one gate tensor per group, shapes matching p_list.
+
+        g_old_list: per-weight gradient of the OLD-task loss w.r.t. the
+        params BEFORE the burst (the task-A sensitivity / EWC diagonal).
+        Lets the governor learn "open gates where A-impact is low" directly,
+        instead of relying on the cancelling 17K-dim FOMAML dot product.
 
         Fully vectorized over all controlled weights (single MLP pass;
         per-group python loops were a major runtime bottleneck).
@@ -140,6 +147,10 @@ class HRMIntentGovernor(nn.Module):
         N = sum(sizes)
         p_all = torch.cat([p.flatten() for p in p_list])
         g_all = torch.cat([g.flatten() for g in g_list])
+        if g_old_list is None:
+            g_old_all = torch.zeros_like(g_all)
+        else:
+            g_old_all = torch.cat([g.detach().flatten() for g in g_old_list])
 
         gids = torch.repeat_interleave(torch.arange(G, device=p_all.device),
                                        torch.tensor(sizes, device=p_all.device))
@@ -150,9 +161,12 @@ class HRMIntentGovernor(nn.Module):
         if self.granularity == "weight":
             onehot = torch.nn.functional.one_hot(gids, num_classes=G).float()
             ctx = global_feats.unsqueeze(0).expand(N, -1)
+            align = (g_all * g_old_all).clamp_min(0.0)
             feats = torch.cat([
                 torch.log1p(g_all.abs() + 1e-12).unsqueeze(-1),
                 torch.log1p(p_all.abs() + 1e-12).unsqueeze(-1),
+                torch.log1p(g_old_all.abs() + 1e-12).unsqueeze(-1),
+                torch.log1p(align + 1e-12).unsqueeze(-1),
                 idx_frac.unsqueeze(-1),
                 onehot,
                 ctx,
@@ -218,6 +232,7 @@ class HRMIntentGovernor(nn.Module):
         loss: torch.Tensor,
         device: torch.device,
         differentiable: bool = True,
+        g_old_list: list[torch.Tensor] | None = None,
     ) -> list[torch.Tensor]:
         """Gate tensors from a functional parameter dict (meta-training path)."""
         p_list = [p_cur[g.name].detach().flatten() for g in groups]
@@ -225,9 +240,9 @@ class HRMIntentGovernor(nn.Module):
         global_feats = compute_global_features(
             x, y, loss, torch.cat(g_flat), torch.cat(p_list), device)
         if differentiable:
-            return self.gate(p_list, g_flat, global_feats)
+            return self.gate(p_list, g_flat, global_feats, g_old_list)
         with torch.no_grad():
-            return self.gate(p_list, g_flat, global_feats)
+            return self.gate(p_list, g_flat, global_feats, g_old_list)
 
     def total_masks(self, groups: list[ParamGroup]) -> int:
         return sum(g.size for g in groups)
