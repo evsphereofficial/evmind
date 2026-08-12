@@ -49,22 +49,31 @@ class TrainConfig:
 @dataclass
 class GovernorConfig:
     """HRM intent governor (Phase 2) settings."""
-    hidden_dim: int = 20        # hidden width of the intent network
+    hidden_dim: int = 24        # hidden width of the gate network
     refine_steps: int = 2       # recursive refinement passes (§132.4)
-    init_mask: float = 0.9      # starting gate value (near baseline behavior)
-    granularity: str = "module"  # "module" (per parameter tensor); "weight" reserved
+    init_mask: float = 0.5      # starting gate value (neutral; sparse cost pushes down)
+    granularity: str = "weight"  # "weight" = one gate per parameter (17,249 gates);
+                                 # "module" = one gate per parameter tensor
 
 
 @dataclass
 class MetaConfig:
-    """Meta-pretraining of the intent network (trained first, then frozen)."""
-    steps: int = 2500           # meta-training steps
-    batch_size: int = 256       # meta task batch
-    warmup_batches: int = 5     # plain updates on task A before the gated B step
+    """Meta-pretraining of the intent network (trained first, then frozen).
+
+    Objective (parameter modification is itself expensive):
+        L = L_new + lambda_old*L_old + lambda_sparse*mean(M)
+            + lambda_delta*mean(|dW|/|W|)
+    """
+    steps: int = 900            # governor optimizer updates
+    meta_batch: int = 8         # parallel meta-steps per update (GPU utilization)
+    batch_size: int = 512       # meta task batch
+    warmup_batches: int = 20    # plain updates on task A so it is well installed
+    burst_steps: int = 20       # gated updates on task B per meta step
     lr: float = 1e-3            # governor learning rate + masked update scale
-    beta_old: float = 1.0       # weight of old-task retention in governor loss
-    entropy_weight: float = 0.02  # gate-decisiveness regularizer
-    eval_pairs: int = 40        # paired gated-vs-ungated sanity check pairs
+    lambda_old: float = 1.0     # weight of old-task degradation penalty
+    lambda_sparse: float = 0.05  # weight of mean(M) cost (fewer open gates)
+    lambda_delta: float = 0.5   # weight of mean relative |dW| (change cost)
+    eval_pairs: int = 24        # paired gated-vs-ungated sanity check pairs
 
 
 @dataclass

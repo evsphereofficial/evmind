@@ -1,16 +1,23 @@
 """HRM-inspired learning governor (Phase 2) — "intent" network.
 
 Architecture reference: architecture_v2.md §132 — HRM-in-the-node learning
-governor. A small recursive intent network is trained FIRST (see
-meta_pretrain.py) to decide how the host model's parameters should change:
-M = f_theta(x, s),  W' = W - lr * M * grad(W).
+governor. A small intent network is trained FIRST (see meta_pretrain.py) to
+decide how the host model's parameters should change:
 
-The intent network outputs one update gate per parameter MODULE (module-level
-granularity, §132.2 starting point). It is frozen during the measured
-continual stream (§132.3: frozen governance core + mutable knowledge).
+    M_i = gate for weight i,   W' = W - lr * M * grad(W)
 
-Hooks mirror the Phase-2 integration interface (§17): the stream calls
-controller.control_update(...) between loss.backward() and optimizer.step().
+Granularity:
+- "weight": one gate per PARAMETER (17,249 gates for the 17K base model).
+  Gates come from a tiny SHARED gate network over per-weight features
+  [log1p(|grad|), log1p(|weight|), position-in-module, module id] + global
+  task/batch context. The gates are amortized, so the intent network stays
+  tiny (~2-4K params) while controlling every single weight.
+- "module": one gate per parameter tensor (coarser reference point, §132.2).
+
+The intent network is FROZEN during the measured continual stream (frozen
+governance core, §132.3). Hooks mirror the Phase-2 interface (§17): the
+stream calls controller.control_update(...) between loss.backward() and
+optimizer.step().
 """
 
 from __future__ import annotations
@@ -27,7 +34,7 @@ class ParamGroup:
     """One controllable parameter module (e.g. a Linear's weight tensor)."""
     name: str
     param: nn.Parameter
-    indices: slice  # reserved for future per-weight granularity
+    indices: slice  # reserved
 
     @property
     def size(self) -> int:
@@ -35,58 +42,29 @@ class ParamGroup:
 
 
 def build_module_groups(model: nn.Module) -> list[ParamGroup]:
-    """One control group per leaf parameter tensor (module-level granularity)."""
+    """One control group per leaf parameter tensor."""
     groups = []
-    total = 0
     for name, p in model.named_parameters():
         if p.requires_grad:
             groups.append(ParamGroup(name=name, param=p, indices=slice(0, p.numel())))
-            total += p.numel()
     return groups
 
 
-def compute_governor_features(
+def compute_global_features(
     x: torch.Tensor,
     y: torch.Tensor,
     loss: torch.Tensor,
-    model: nn.Module,
-    groups: list[ParamGroup],
+    g_all_flat: torch.Tensor,
+    p_all_flat: torch.Tensor,
     device: torch.device,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """State features s for the governor.
-
-    Returns:
-        group_feats: (num_groups, 5) per-module statistics.
-        global_feats: (9,) task/batch-level statistics.
-    """
+) -> torch.Tensor:
+    """Task/batch-level context vector for the governor (9 features)."""
     eps = 1e-8
-    grads = [g.param.grad.detach().flatten() for g in groups
-             if g.param.grad is not None]
-    params = [g.param.detach().flatten() for g in groups]
-
-    g_all = torch.cat(grads)
-    p_all = torch.cat(params)
-    g_mean = g_all.abs().mean()
-    p_mean = p_all.abs().mean()
-    gp_all = torch.cat([gi * pi for gi, pi in zip(grads, params)])
-    gp_mean = gp_all.abs().mean()
-
-    group_feats = []
-    for g, p in zip(grads, params):
-        f0 = g.abs().mean() / (g_mean + eps)            # relative grad magnitude
-        f1 = p.abs().mean() / (p_mean + eps)            # relative param scale
-        f2 = (g * p).abs().mean() / (gp_mean + eps)     # grad/param alignment
-        f3 = torch.log1p(g.abs().mean())                # absolute grad level
-        f4 = torch.log1p((g ** 2).mean())               # gradient sharpness
-        group_feats.append(torch.stack([f0, f1, f2, f3, f4]))
-    group_feats = torch.stack(group_feats).to(device)   # (G, 5)
-
-    # Batch geometry hints (task-agnostic: no task-ID ever reaches the model).
     xb = x.detach()
-    global_feats = torch.tensor([
+    return torch.tensor([
         torch.log1p(loss.detach()),
-        torch.log1p(g_mean),
-        torch.log1p(p_mean),
+        torch.log1p(g_all_flat.abs().mean().detach() + eps),
+        torch.log1p(p_all_flat.abs().mean().detach() + eps),
         xb[:, 0].mean(),
         xb[:, 1].mean(),
         (xb[:, 0] ** 2 + xb[:, 1] ** 2).mean(),
@@ -95,77 +73,184 @@ def compute_governor_features(
         y.detach().mean(),
     ], device=device)
 
-    return group_feats, global_feats
-
 
 class HRMIntentGovernor(nn.Module):
-    """Tiny recursive intent network: batch features -> per-module update gates.
+    """Tiny intent network: parameter/gradient state -> per-weight update gates.
 
-    Architecture (HRM-inspired, "recursive refinement of a decision state"):
-        per-group embeddings -> GRU refinement passes over the group sequence
-        -> final per-group gate logits -> sigmoid masks M in (0, 1).
+    Design:
+        * per-weight features: [log1p(|g|), log1p(|p|), position_in_module,
+          module_id(one-hot)]  (module_id + position = structural identity,
+          NOT task identity -- no task-ID ever reaches it)
+        * + global context (9) broadcast to every weight
+        * shared MLP -> gate logits -> sigmoid masks M in (0, 1)
+        * recursive refinement: refine_steps passes, each re-feeding the mean
+          gate of the previous pass (HRM-style iterative decision refinement)
+
+    Total masks = total parameter count (e.g. 17,249 for the base model).
     """
 
     def __init__(
         self,
         num_groups: int,
-        group_feat_dim: int = 5,
-        global_feat_dim: int = 9,
-        hidden_dim: int = 20,
+        granularity: str = "weight",
+        hidden_dim: int = 24,
         refine_steps: int = 2,
-        init_mask: float = 0.9,
+        init_mask: float = 0.5,
+        global_feat_dim: int = 9,
+        per_weight_feat_dim: int = 2,   # log1p|g|, log1p|p| (position+onehot appended)
     ) -> None:
         super().__init__()
+        assert granularity in ("weight", "module")
+        self.granularity = granularity
         self.num_groups = num_groups
+        self.refine_steps = refine_steps
 
-        self.mlp_g = nn.Sequential(
-            nn.Linear(group_feat_dim, hidden_dim), nn.ReLU())
-        self.mlp_c = nn.Sequential(
-            nn.Linear(global_feat_dim, hidden_dim), nn.ReLU())
-        self.gru = nn.GRUCell(hidden_dim, hidden_dim)
-        self.mlp_m = nn.Sequential(
-            nn.Linear(hidden_dim * 2, hidden_dim), nn.ReLU(),
+        # input width: plus 1 for the recursive refinement channel (prev mean gate)
+        w_in = per_weight_feat_dim + 1 + num_groups + global_feat_dim + 1
+        # module: group stats + context
+        m_in = 5 + global_feat_dim + 1
+        in_dim = w_in if granularity == "weight" else m_in
+
+        self.mlp = nn.Sequential(
+            nn.Linear(in_dim, hidden_dim), nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim), nn.ReLU(),
             nn.Linear(hidden_dim, 1))
+        self.per_weight_feat_dim = per_weight_feat_dim
+        self.global_feat_dim = global_feat_dim
 
-        # Start near-identity gates (m ~ init_mask) so meta-training begins
-        # from baseline-like behavior, then specializes.
         if init_mask is not None:
             b = math.log(init_mask / (1.0 - init_mask))
             with torch.no_grad():
-                self.mlp_m[-1].bias.fill_(b)
+                self.mlp[-1].bias.fill_(b)
 
-    def forward(
+    # -- feature assembly ----------------------------------------------------
+    def _weight_feats(
         self,
-        group_feats: torch.Tensor,
+        p: torch.Tensor,           # flat per-group params (detached ok)
+        g: torch.Tensor,           # flat per-group grads (detached ok)
+        group_idx: int,
         global_feats: torch.Tensor,
     ) -> torch.Tensor:
-        """Returns masks of shape (num_groups,) in (0, 1)."""
-        g = self.mlp_g(group_feats)          # (G, h)
-        c = self.mlp_c(global_feats.unsqueeze(0)).squeeze(0)  # (h,)
+        n = p.numel()
+        idx = torch.arange(n, device=p.device, dtype=torch.float32)
+        idx_frac = idx / max(n, 1)
+        onehot = torch.zeros(n, self.num_groups, device=p.device)
+        onehot[:, group_idx] = 1.0
+        ctx = global_feats.unsqueeze(0).expand(n, -1)
+        return torch.cat([
+            torch.log1p(g.abs() + 1e-12).unsqueeze(-1),
+            torch.log1p(p.abs() + 1e-12).unsqueeze(-1),
+            idx_frac.unsqueeze(-1),
+            onehot,
+            ctx,
+        ], dim=-1)
 
-        h = c.repeat(self.num_groups, 1)
-        for _ in range(self.refine_steps):
-            h = self.gru(g, h)               # refine decision state recursively
-        gates = self.mlp_m(torch.cat([h, c.repeat(self.num_groups, 1)], dim=-1))
-        return torch.sigmoid(gates.squeeze(-1))
+    def _module_feats(
+        self, p: torch.Tensor, g: torch.Tensor, global_feats: torch.Tensor
+    ) -> torch.Tensor:
+        eps = 1e-8
+        return torch.cat([
+            g.abs().mean().unsqueeze(0),
+            p.abs().mean().unsqueeze(0),
+            (g * p).abs().mean().unsqueeze(0),
+            torch.log1p(g.abs().mean()).unsqueeze(0),
+            torch.log1p((g ** 2).mean()).unsqueeze(0),
+            global_feats,
+        ], dim=0).unsqueeze(0)
+
+    # -- main API -------------------------------------------------------------
+    def gate(
+        self,
+        p_list: list[torch.Tensor],
+        g_list: list[torch.Tensor],
+        global_feats: torch.Tensor,
+    ) -> list[torch.Tensor]:
+        """Return one gate tensor per group, shapes matching p_list.
+
+        p_list/g_list: current parameters and raw gradients per group.
+        """
+        masks = []
+        prev_mean = torch.full((1,), self.mlp[-1].bias.detach().sigmoid()
+                               if hasattr(self.mlp[-1], "bias")
+                               else 0.5, device=p_list[0].device)
+        for i, (p, g) in enumerate(zip(p_list, g_list)):
+            if self.granularity == "weight":
+                feats = self._weight_feats(p, g, i, global_feats)
+            else:
+                feats = self._module_feats(p, g, global_feats)
+            for _ in range(self.refine_steps):
+                gate_logit = self.mlp(torch.cat([
+                    feats, prev_mean.expand(feats.shape[0], -1)], dim=-1))
+                m = torch.sigmoid(gate_logit).squeeze(-1)
+                prev_mean = m.mean().reshape(1)
+            masks.append(m)
+        return masks
+
+    def gate_from_model(
+        self,
+        model: nn.Module,
+        groups: list[ParamGroup],
+        x: torch.Tensor,
+        y: torch.Tensor,
+        loss: torch.Tensor,
+        device: torch.device,
+    ) -> list[torch.Tensor]:
+        """Gate tensors computed from a live model's params + .grad."""
+        p_list = [g.param.detach().flatten() for g in groups]
+        g_list = [g.param.grad.detach().flatten() for g in groups]
+        global_feats = compute_global_features(
+            x, y, loss,
+            torch.cat(g_list), torch.cat(p_list), device)
+        return self.gate(p_list, g_list, global_feats)
+
+    def gate_from_state(
+        self,
+        p_cur: dict[str, torch.Tensor],
+        g_list: list[torch.Tensor],
+        groups: list[ParamGroup],
+        x: torch.Tensor,
+        y: torch.Tensor,
+        loss: torch.Tensor,
+        device: torch.device,
+        differentiable: bool = True,
+    ) -> list[torch.Tensor]:
+        """Gate tensors from a functional parameter dict (meta-training path)."""
+        p_list = [p_cur[g.name].detach().flatten() for g in groups]
+        g_flat = [g.detach().flatten() for g in g_list]
+        global_feats = compute_global_features(
+            x, y, loss, torch.cat(g_flat), torch.cat(p_list), device)
+        if differentiable:
+            return self.gate(p_list, g_flat, global_feats)
+        with torch.no_grad():
+            return self.gate(p_list, g_flat, global_feats)
+
+    def total_masks(self, groups: list[ParamGroup]) -> int:
+        return sum(g.size for g in groups)
+
+    def governor_params(self) -> int:
+        return sum(p.numel() for p in self.parameters() if p.requires_grad)
 
     @staticmethod
     def mask_entropy(m: torch.Tensor) -> torch.Tensor:
-        """Entropy of gates (regularizer encouraging decisive 0/1 masks)."""
         m = m.clamp(1e-6, 1 - 1e-6)
         return -(m * torch.log(m) + (1 - m) * torch.log(1 - m)).mean()
 
-    def governor_params(self) -> int:
-        """Number of parameters of the intent network itself."""
-        return sum(p.numel() for p in self.parameters() if p.requires_grad)
+
+def mask_stats(masks: list[torch.Tensor]) -> dict[str, float]:
+    """Aggregate gate diagnostics: mean/std/min/max and decisive fractions."""
+    m = torch.cat([mi.flatten() for mi in masks])
+    return {
+        "mask_mean": float(m.mean()),
+        "mask_std": float(m.std()),
+        "mask_min": float(m.min()),
+        "mask_max": float(m.max()),
+        "frac_lt_0.1": float((m < 0.1).float().mean()),
+        "frac_gt_0.9": float((m > 0.9).float().mean()),
+    }
 
 
 class HRMController:
-    """Phase-2 controller wrapping the frozen intent governor (§17 hooks).
-
-    The baseline stream calls control_update() after loss.backward() and
-    before optimizer.step(): gates are multiplied into the raw gradients.
-    """
+    """Phase-2 controller wrapping the frozen intent governor (§17 hooks)."""
 
     def __init__(self, governor: HRMIntentGovernor, groups: list[ParamGroup],
                  device: torch.device) -> None:
@@ -180,21 +265,13 @@ class HRMController:
         x: torch.Tensor,
         y: torch.Tensor,
         loss: torch.Tensor,
-    ) -> torch.Tensor:
+    ) -> list[torch.Tensor]:
         """Gate the accumulated gradients in place; returns the masks."""
-        group_feats, global_feats = compute_governor_features(
-            x, y, loss, model, self.groups, self.device)
-        masks = self.governor(group_feats, global_feats)
-
+        masks = self.governor.gate_from_model(model, self.groups, x, y, loss, self.device)
         for group, m in zip(self.groups, masks):
             if group.param.grad is not None:
-                group.param.grad.mul_(float(m))
+                group.param.grad.mul_(m.reshape(group.param.shape))
         return masks
-
-    def mask_stats(self) -> dict[str, float]:
-        """Summary of current gate statistics (diagnostics)."""
-        total = self.governor.num_groups
-        return {"num_groups": total}
 
 
 def measure_update_fraction(
@@ -214,3 +291,19 @@ def measure_update_fraction(
         changed += (rel > threshold).sum().item()
         total += p.numel()
     return 100.0 * changed / total if total else 0.0
+
+
+def measure_rel_change(
+    model: nn.Module, snapshot: dict[str, torch.Tensor]
+) -> float:
+    """Mean relative |dW|/|W| over all parameters (change cost statistic)."""
+    eps = 1e-8
+    total = 0.0
+    n = 0
+    for name, p in model.named_parameters():
+        if name not in snapshot:
+            continue
+        rel = (p.detach() - snapshot[name]).abs() / (snapshot[name].abs() + eps)
+        total += float(rel.mean())
+        n += 1
+    return total / n if n else 0.0

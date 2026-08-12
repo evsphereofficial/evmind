@@ -29,7 +29,10 @@ from .config import load_config
 from .dataset import generate_dataset
 from .evaluate import evaluate
 from .experiment import make_optimizer, plot_accuracy_matrix, set_seed
-from .hrm import build_module_groups, HRMController, HRMIntentGovernor, measure_update_fraction
+from .hrm import (
+    build_module_groups, HRMController, HRMIntentGovernor, mask_stats,
+    measure_rel_change, measure_update_fraction,
+)
 from .metrics import compute_forgetting
 from .model import TinyNumericTransformer
 from .tasks import build_tasks
@@ -68,13 +71,9 @@ def train_one_epoch_gated(
         masks = controller.control_update(model, x, y, loss)   # gate gradients
         optimizer.step()
 
-        if step == 0:
-            mask_rows.append({
-                "phase": phase,
-                "batch": step,
-                **{f"mask_{i}": float(mi) for i, mi in enumerate(masks.cpu())},
-                "mask_mean": float(masks.mean().cpu()),
-            })
+        if step == 0 or step == len(loader) - 1:
+            stats = mask_stats(masks)
+            mask_rows.append({"phase": phase, "batch": step, **stats})
 
         total_loss += loss.item() * x.size(0)
         preds = (torch.sigmoid(logits) >= 0.5).long()
@@ -166,6 +165,7 @@ def main() -> None:
     groups = build_module_groups(model)
     governor = HRMIntentGovernor(
         num_groups=len(groups),
+        granularity=cfg.governor.granularity,
         hidden_dim=cfg.governor.hidden_dim,
         refine_steps=cfg.governor.refine_steps,
         init_mask=cfg.governor.init_mask,
@@ -181,8 +181,9 @@ def main() -> None:
     print("PHASE 2 — HRM-GOVERNED LIVE LEARNING")
     print("=" * 60)
     print(f"Base model parameters: {num_params:,}  (identical to Phase 1)")
-    print(f"Governor (frozen intent net): {governor.governor_params():,} "
-          f"params over {len(groups)} module groups")
+    print(f"Governor (frozen intent net): {governor.governor_params():,} params "
+          f"controlling {sum(g.size for g in groups):,} weights "
+          f"({governor.granularity}-level, {len(groups)} modules)")
     print(f"Governor file: {args.governor}\n")
 
     # --- continual stream (same protocol as Phase 1) -------------------------
@@ -191,6 +192,7 @@ def main() -> None:
     mask_rows: list[dict] = []
     train_times: dict[int, float] = {}
     update_fractions: dict[int, float] = {}
+    rel_changes: dict[int, float] = {}
 
     if torch.cuda.is_available():
         torch.cuda.reset_peak_memory_stats()
@@ -220,6 +222,7 @@ def main() -> None:
                   f" loss={loss:.4f} acc={acc:.2f}%")
         train_times[phase] = time.perf_counter() - train_start
         update_fractions[phase] = measure_update_fraction(model, snapshot)
+        rel_changes[phase] = measure_rel_change(model, snapshot)
 
         print(f"  Evaluating task(s): {', '.join(task_names[: phase + 1])}")
         for i in range(phase + 1):
@@ -249,6 +252,7 @@ def main() -> None:
     pd.DataFrame({
         "task": task_names,
         "update_fraction_pct": [round(update_fractions[i], 3) for i in range(num_tasks)],
+        "mean_rel_change": [round(rel_changes[i], 5) for i in range(num_tasks)],
     }).to_csv(outdir / "update_fraction.csv", index=False)
 
     peak_vram_mb = None
@@ -263,6 +267,7 @@ def main() -> None:
         "parameter_count": num_params,
         "governor_params": governor.governor_params(),
         "num_groups": len(groups),
+        "granularity": governor.granularity,
         "training_time_seconds": {f"task{i+1}": round(t, 3) for i, t in train_times.items()},
         "total_training_seconds": round(sum(train_times.values()), 3),
         "inference_latency_ms_per_sample": latency_ms,
@@ -272,6 +277,7 @@ def main() -> None:
         "average_forgetting": metric["average_forgetting"],
         "average_forgetting_overwritten": float(np.nanmean(metric["forgetting"][:-1])),
         "update_fractions": {f"task{i+1}": update_fractions[i] for i in range(num_tasks)},
+        "mean_rel_changes": {f"task{i+1}": rel_changes[i] for i in range(num_tasks)},
     }
     with open(outdir / "run_config.json", "w") as f:
         json.dump(run_info, f, indent=2)
@@ -304,7 +310,8 @@ def main() -> None:
         print(f"  Initial accuracy: {metric['initial'][i]:.2f}%")
         print(f"  Final accuracy:   {metric['final'][i]:.2f}%")
         print(f"  Forgetting:       {metric['forgetting'][i]:.2f}%")
-        print(f"  Update fraction:  {update_fractions[i]:.2f}%")
+        print(f"  Update fraction:  {update_fractions[i]:.2f}%   "
+              f"mean rel |dW|: {rel_changes[i]:.4f}")
     print("\n" + "=" * 60)
     print(f"Average Forgetting: {metric['average_forgetting']:.2f}%")
     print(f"Average Forgetting (overwritten tasks 1..{num_tasks - 1}): "

@@ -45,20 +45,29 @@ train:
   num_workers: 0
 
 # Tiny HRM intent network (learning governor) - architecture_v2.md section 132.
+# Granularity "weight": ONE learned gate per parameter (17,249 gates for the
+# 17K base model), produced by a tiny shared gate network. The governor is
+# trained first (below), then frozen during the measured stream.
 governor:
-  hidden_dim: 20
+  hidden_dim: 24
   refine_steps: 2
-  init_mask: 0.9
-  granularity: module
+  init_mask: 0.5
+  granularity: weight
 
-# First stage: meta-pretrain the intent network (trained on the same geometry
-# families with randomized boundary shifts; disclosed in MASTER.md), so that
-# it can decide retention before the measured continual stream begins.
+# First stage: meta-pretrain the intent network on the same geometry families
+# with randomized boundary shifts (disclosed in MASTER.md).
+#
+# Objective - parameter modification itself is expensive:
+#   L = L_new + lambda_old*L_old + lambda_sparse*mean(M) + lambda_delta*mean(|dW|/|W|)
+#   so the governor must learn selective plasticity, not "update everything".
 meta:
-  steps: 2500
-  batch_size: 256
-  warmup_batches: 5
+  steps: 900
+  meta_batch: 8
+  batch_size: 512
+  warmup_batches: 20
+  burst_steps: 20
   lr: 0.001
-  beta_old: 1.0
-  entropy_weight: 0.02
-  eval_pairs: 40
+  lambda_old: 1.0
+  lambda_sparse: 0.05
+  lambda_delta: 0.5
+  eval_pairs: 24
