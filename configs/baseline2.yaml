@@ -68,6 +68,20 @@ governor:
 #   "ewc" (running mean of per-task g^2, classic Fisher), "max" (running max,
 #   protect if ANY old task depends), "recency" (recency-weighted mean),
 #   "ema" (exponential moving average).
+#
+# TRANSFER FIX (burst_optim=adamw, burst_lr -> live lr):
+#   The burst that meta-training unrolls now mirrors the LIVE stream's
+#   optimizer semantics: a stateless AdamW whose per-weight step
+#   W -= lr * M o m_hat/sqrt(v_hat) is EXACTLY what experiment2's
+#   scale_update applies live (mask scales AdamW's normalized delta, not the
+#   raw gradient). With lr = the live 1e-3, per-step movement magnitude now
+#   matches the stream. Additionally the parameter-change penalty is
+#   extrapolated from the short burst to a full live phase (phase_scale =
+#   live_batches / burst_steps), because AdamW deltas accumulate ~linearly in
+#   step count: the old 3-step SGD burst at 0.03 moved weights ~100x less per
+#   phase than the live 395-step AdamW phase, so the governor learned mask
+#   levels (~0.14-0.2) that looked harmless in meta but catastrophically
+#   overwrote old tasks in the stream.
 meta:
   steps: 200
   meta_batch: 8
@@ -76,7 +90,8 @@ meta:
   warmup_lr: 0.002
   burst_steps: 3
   lr: 0.001
-  burst_lr: 0.03
+  burst_optim: adamw
+  burst_lr: 0.03        # legacy SGD burst lr (only used if burst_optim=sgd)
   lambda_old: 1.0
   lambda_sparse: 1.0
   sparse_target: 0.3

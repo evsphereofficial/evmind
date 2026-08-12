@@ -75,8 +75,13 @@ class MetaConfig:
                                 # FOMAML gradient predicted); ~3 steps make
                                 # the trajectory smooth and gradients valid
     lr: float = 1e-3            # governor optimizer learning rate
-    burst_lr: float = 3e-2      # masked update scale during the B burst
-                                # (3 x 3e-2 ~= 20 x 2e-3 in total update mass)
+    burst_optim: str = "adamw"  # burst update semantics: "adamw" = stateless
+                                # AdamW matching the live stream's scale_update
+                                # (mask scales AdamW's normalized delta; this is
+                                # the transfer fix); "sgd" = legacy masked grad
+    burst_lr: float = 3e-2      # masked update scale during the B burst if
+                                # burst_optim=sgd; for adamw the burst uses the
+                                # LIVE lr (meta.lr must equal the train lr)
     lambda_old: float = 1.0     # weight of old-task degradation penalty
     lambda_sparse: float = 1.0  # weight of (mean(M)-sparse_target)^2
     sparse_target: float = 0.3  # desired fraction of open gate mass

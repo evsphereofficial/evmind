@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import time
 from pathlib import Path
 
@@ -144,14 +145,34 @@ def gated_burst(
     second_order: bool = False,
     mem_imp: list[torch.Tensor] | None = None,
     mem_dir: list[torch.Tensor] | None = None,
+    optim: str = "adamw",
 ) -> tuple[dict[str, torch.Tensor], list[dict], float]:
     """Unroll `steps` governor-gated updates on `task`.
+
+    Update rule matches the LIVE stream's optimizer semantics (optim choice):
+      "adamw": stateless AdamW step W -= lr * M o m_hat/sqrt(v_hat)
+               (mirrors experiment2's scale_update: the mask scales AdamW's
+               normalized delta, NOT the raw gradient, which AdamW's
+               per-weight normalization would erase). This is the critical
+               transfer fix: meta-training used plain SGD at lr 0.03 over 3
+               steps (~0.09*|g| total movement), but the live stream runs
+               395 AdamW steps at lr 1e-3 whose normalized deltas accumulate
+               ~0.5 total movement PER PHASE. The same mask therefore caused
+               ~100x more damage live than in meta, which is why masks of
+               0.14-0.20 looked harmless during meta but catastrophically
+               overwrote old tasks in the stream.
+      "sgd":  W -= lr * M o g (legacy, kept for comparison)
 
     Returns (final params dict, per-step mask stats, mean gate across steps).
     """
     mask_log: list[dict] = []
     gate_means = []
     ewc_costs = []
+    use_adam = optim == "adamw"
+    beta1, beta2, ad_eps = 0.9, 0.999, 1e-8
+    if use_adam:
+        m_buf = [torch.zeros_like(p_cur[g.name]) for g in groups]
+        v_buf = [torch.zeros_like(p_cur[g.name]) for g in groups]
     g_old_hat = None
     g_old_hat_all = None
     if g_old is not None:
@@ -191,8 +212,18 @@ def gated_burst(
             # fighting the sparse-target level term
             ewc_costs.append((m_all * g_old_hat_all ** 2).mean() - m_all.mean())
 
-        for group, m, g in zip(groups, masks, grad_list):
-            p_cur[group.name] = p_cur[group.name] - lr * m.reshape(g.shape) * g
+        for i, (group, m, g) in enumerate(zip(groups, masks, grad_list)):
+            mf = m.reshape(g.shape)
+            if use_adam:
+                m_buf[i] = beta1 * m_buf[i] + (1 - beta1) * g
+                v_buf[i] = beta2 * v_buf[i] + (1 - beta2) * g * g
+                t = s + 1
+                m_hat = m_buf[i] / (1 - beta1 ** t)
+                v_hat = v_buf[i] / (1 - beta2 ** t)
+                p_cur[group.name] = p_cur[group.name] - lr * mf * (
+                    m_hat / (v_hat.sqrt() + ad_eps))
+            else:
+                p_cur[group.name] = p_cur[group.name] - lr * mf * g
 
     mean_gate = torch.stack(gate_means).mean()
     mean_ewc = torch.stack(ewc_costs).mean() if ewc_costs else None
@@ -250,7 +281,12 @@ def meta_step(
     plus scalar diagnostics.
     """
     m = config.meta
-    base_lr = m.burst_lr
+    optim_name = getattr(m, "burst_optim", "adamw")
+    # TRANSFER FIX: AdamW burst uses the LIVE stream's learning rate so the
+    # per-step movement magnitude matches the real stream (AdamW normalized
+    # deltas are ~lr per step). Legacy SGD mode keeps burst_lr.
+    base_lr = (m.lr if optim_name == "adamw"
+               else getattr(m, "burst_lr", m.lr))
     warmup_lr = getattr(m, "warmup_lr", m.lr)
     bsize = m.batch_size
     old_tasks_max = int(getattr(m, "old_tasks_max", 0))
@@ -293,7 +329,7 @@ def meta_step(
         lr=base_lr, steps=m.burst_steps, batch_size=bsize,
         seed_base=seed_off * 37 + 5, device=device, differentiable=True,
         g_old=g_old_imm, p0=p0, second_order=m.second_order,
-        mem_imp=mem_imp, mem_dir=mem_dir)
+        mem_imp=mem_imp, mem_dir=mem_dir, optim=optim_name)
 
     x_bv = _sample_batch(bsize, seed_offset=seed_off * 43 + 11).to(device)
     y_bv = meta_task_labels(x_bv, fam_b).to(device)
@@ -317,6 +353,23 @@ def meta_step(
     p0_abs = torch.cat([p0[g.name].abs().flatten() for g in groups])
     mean_rel_change = (dW.mean() + 1e-12) / (p0_abs.mean() + 1e-12)
 
+    # TRANSFER FIX: the burst is a few steps, but the live stream runs a FULL
+    # phase (epochs * batches at live lr under the same AdamW dynamics). AdamW
+    # normalized deltas have roughly constant per-step magnitude, so damage
+    # accumulates ~linearly in step count. Extrapolate the delta cost from the
+    # short burst to the full-phase length, otherwise the governor is only
+    # penalized for ~3/395 of the real damage its masks allow (this was the
+    # root cause of mask levels ~0.14-0.2 that wrecked old tasks live).
+    optim_name = getattr(m, "burst_optim", "adamw")
+    if optim_name == "adamw":
+        train_batches = int(math.ceil(
+            config.train_samples / config.train.batch_size))
+        live_steps = train_batches * int(config.train.epochs_per_task)
+        phase_scale = live_steps / max(1, int(m.burst_steps))
+    else:
+        phase_scale = 1.0
+    delta_cost_live = mean_rel_change * phase_scale
+
     sparse_cost = (mean_gate - getattr(m, "sparse_target", 0.3)) ** 2
     ewc_cost = mean_ewc if mean_ewc is not None else torch.zeros((), device=device)
 
@@ -326,7 +379,7 @@ def meta_step(
         + m.lambda_old * loss_old
         + m.lambda_sparse * sparse_cost
         + getattr(m, "lambda_ewc", 0.0) * ewc_cost
-        + m.lambda_delta * mean_rel_change
+        + m.lambda_delta * delta_cost_live
     )
 
     model.zero_grad(set_to_none=True)
@@ -336,7 +389,8 @@ def meta_step(
         "loss_old": loss_old,
         "sparse_cost": sparse_cost,
         "ewc_cost": ewc_cost,
-        "delta_cost": mean_rel_change,
+        "delta_cost": delta_cost_live,
+        "phase_scale": phase_scale,
         "mask_stats": mask_log[-1],
     }
 
@@ -357,7 +411,9 @@ def meta_evaluate(
     """Multi-task evaluate: install old tasks (with memory), burst on B,
     measure retention over ALL old tasks (gated vs ungated)."""
     m = config.meta
-    base_lr = m.burst_lr
+    optim_name = getattr(m, "burst_optim", "adamw")
+    base_lr = (m.lr if optim_name == "adamw"
+               else getattr(m, "burst_lr", m.lr))
     warmup_lr = getattr(m, "warmup_lr", m.lr)
     bsize = m.batch_size
     old_tasks_max = int(getattr(m, "old_tasks_max", 1))
@@ -408,7 +464,8 @@ def meta_evaluate(
             model, governor, groups, p_g, fam_b,
             lr=base_lr, steps=m.burst_steps, batch_size=bsize,
             seed_base=p * 157 + 5, device=device, differentiable=False,
-            g_old=g_old_imm, p0=p0, mem_imp=mem_imp, mem_dir=mem_dir)
+            g_old=g_old_imm, p0=p0, mem_imp=mem_imp, mem_dir=mem_dir,
+            optim=getattr(m, "burst_optim", "adamw"))
         with torch.no_grad():
             acc_a_gated = float(np.mean([
                 (functional_call(model, p_g, (xa,)) > 0).float()
@@ -426,7 +483,7 @@ def meta_evaluate(
             model, governor, groups, p_u, fam_b,
             lr=base_lr, steps=m.burst_steps, batch_size=bsize,
             seed_base=p * 157 + 5, device=device, differentiable=False,
-            ungated=True)
+            ungated=True, optim=getattr(m, "burst_optim", "adamw"))
         with torch.no_grad():
             acc_a_ungated = float(np.mean([
                 (functional_call(model, p_u, (xa,)) > 0).float()
@@ -541,7 +598,8 @@ def main() -> None:
           f"+ {getattr(m, 'lambda_ewc', 0.0)}*mean(M*(gA_hat^2-1)) "
           f"+ {m.lambda_delta}*mean(|dW|/|W|)")
     print(f"Meta-batching: {m.meta_batch} parallel steps per governor update, "
-          f"{m.steps} updates, warmup={m.warmup_batches} burst={m.burst_steps} "
+          f"{m.steps} updates, warmup={m.warmup_batches} "
+          f"burst={m.burst_steps}x{getattr(m, 'burst_optim', 'adamw')} "
           f"batch={m.batch_size}")
     print(f"Old-knowledge memory: depth 0..{getattr(m, 'old_tasks_max', 0)} tasks, "
           f"agg='{getattr(m, 'memory_agg', 'ewc')}' "
@@ -567,29 +625,30 @@ def main() -> None:
         gov_opt.step()
 
         o = outs[-1]
-        vals = (o["loss_new"], o["loss_old"], o["sparse_cost"],
-                o["ewc_cost"], o["delta_cost"])
-        for key, v in zip(ema, vals):
-            ema[key] = 0.98 * ema[key] + 0.02 * float(v.detach())
+    vals = (o["loss_new"], o["loss_old"], o["sparse_cost"],
+            o["ewc_cost"], o["delta_cost"])
+    for key, v in zip(ema, vals):
+        ema[key] = 0.98 * ema[key] + 0.02 * float(v.detach())
 
-        if step % 50 == 0 or step == 1:
-            stats = o["mask_stats"]
-            log.append({
-                "step": step,
-                "gov_loss": float(total_loss.detach()),
-                "loss_new": float(o["loss_new"].detach()),
-                "loss_old": float(o["loss_old"].detach()),
-                "sparse_cost": float(o["sparse_cost"].detach()),
-                "ewc_cost": float(o["ewc_cost"].detach()),
-                "delta_cost": float(o["delta_cost"].detach()),
-                **{k: round(v, 4) for k, v in stats.items()},
-            })
-            print(f"step {step:5d}/{m.steps}  L_new={ema['L_new']:.4f} "
-                  f"L_old={ema['L_old']:.4f}  sp={ema['sparse']:.4f} "
-                  f"ewc={ema['ewc']:.4f} dW={ema['delta']:.5f}  "
-                  f"| mask mean={stats['mask_mean']:.3f} "
-                  f"min={stats['mask_min']:.3f} max={stats['mask_max']:.3f} "
-                  f"<0.1:{stats['frac_lt_0.1']:.2f} >0.9:{stats['frac_gt_0.9']:.2f}")
+    if step % 50 == 0 or step == 1:
+        stats = o["mask_stats"]
+        log.append({
+            "step": step,
+            "gov_loss": float(total_loss.detach()),
+            "loss_new": float(o["loss_new"].detach()),
+            "loss_old": float(o["loss_old"].detach()),
+            "sparse_cost": float(o["sparse_cost"].detach()),
+            "ewc_cost": float(o["ewc_cost"].detach()),
+            "delta_cost": float(o["delta_cost"].detach()),
+            "phase_scale": float(o["phase_scale"]),
+            **{k: round(v, 4) for k, v in stats.items()},
+        })
+        print(f"step {step:5d}/{m.steps}  L_new={ema['L_new']:.4f} "
+              f"L_old={ema['L_old']:.4f}  sp={ema['sparse']:.4f} "
+              f"ewc={ema['ewc']:.4f} dW={ema['delta']:.5f}  "
+              f"| mask mean={stats['mask_mean']:.3f} "
+              f"min={stats['mask_min']:.3f} max={stats['mask_max']:.3f} "
+              f"<0.1:{stats['frac_lt_0.1']:.2f} >0.9:{stats['frac_gt_0.9']:.2f}")
 
     pd.DataFrame(log).to_csv(outdir / "meta_train_log.csv", index=False)
 
