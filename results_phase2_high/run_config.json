@@ -81,31 +81,31 @@
   "num_groups": 29,
   "granularity": "weight",
   "training_time_seconds": {
-    "task1": 5.157,
-    "task2": 5.183,
-    "task3": 4.282,
-    "task4": 4.265,
-    "task5": 4.1
+    "task1": 4.306,
+    "task2": 4.091,
+    "task3": 4.128,
+    "task4": 4.091,
+    "task5": 4.175
   },
-  "total_training_seconds": 22.988,
-  "inference_latency_ms_per_sample": 0.0003706200000124227,
+  "total_training_seconds": 20.791,
+  "inference_latency_ms_per_sample": 0.00041341199994349154,
   "peak_vram_mb": 37.01,
-  "peak_ram_mb": 1419.9,
-  "final_average_accuracy": 59.82000000000001,
-  "average_forgetting": 39.010000000000005,
-  "average_forgetting_overwritten": 48.7625,
+  "peak_ram_mb": 1415.35,
+  "final_average_accuracy": 60.2,
+  "average_forgetting": 38.05,
+  "average_forgetting_overwritten": 47.5625,
   "update_fractions": {
-    "task1": 99.79708968635863,
-    "task2": 99.6753434981738,
-    "task3": 99.38547162154327,
-    "task4": 99.3970664966085,
-    "task5": 99.41445880920634
+    "task1": 99.64055887297815,
+    "task2": 99.55359730998899,
+    "task3": 99.08980230738014,
+    "task4": 99.1245869325758,
+    "task5": 99.19415618296713
   },
   "mean_rel_changes": {
-    "task1": 1963.7470999380637,
-    "task2": 3.96561730396131,
-    "task3": 1.4731166645370681,
-    "task4": 0.7524458411117566,
-    "task5": 0.9525056352260811
+    "task1": 670.6669039190587,
+    "task2": 2.0557040242992084,
+    "task3": 1.334678944521423,
+    "task4": 0.7673670206989708,
+    "task5": 0.7020599860055693
   }
 }

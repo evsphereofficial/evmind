@@ -167,6 +167,70 @@ unmistakable. This is the number Phase 2 (HRM-inspired controller) must beat.
 - Do not proceed to larger EvMind experiments until the retention question
   is understood (§12).
 
+### Step 4 — Phase 2: HRM Learning Governor (2026-08-12, DONE)
+
+HRM intent network (1,705 frozen params) controlling all 17,249 base weights
+via a shared gate-MLP (one gate per weight). Meta-pretrained FIRST on the
+same 5 geometry families with randomized boundary shifts, then frozen during
+the measured 5-task stream (identical protocol to Phase 1).
+
+**Google-Spaced states, one after another:**
+
+1. **M=1 collapse (naive objective `L_new + β·L_old`):** degenerate flat
+   optimum → governor learned "update everything". Gated = ungated
+   (69.83% = 69.83%).
+2. **M→0 collapse (added `mean(M)` + `mean|ΔW|/|W|` costs):** direct
+   sparse-gradient swamped the unroll gradient → governor learned "update
+   nothing". Old task preserved trivially, new task not learned.
+3. **`(mean(M)−τ)²` level term:** level follows τ (0.023→0.306 by design),
+   but the 20-step unroll is CHAOTIC: meta-loss cliffs are ~6 orders
+   steeper than the FOMAML gradient predicts; even full 2nd-order MAML
+   (create_graph through math attention) cannot optimize it —
+   no gradient method can optimize a non-smooth unrolled trajectory.
+4. **Short 3-step horizon @ lr 3e-2 (valid gradient, FOMAML ok):** the
+   governor now learns a real plasticity–retention tradeoff: paired-burst
+   eval at τ=0.30 → old retention +2.9 pp vs ungated, new-task −1.4 pp.
+5. **Gradient-relationship features** (per weight): cos(gA,gB) alignment,
+   signed conflict magnitude, |gA|, |gB|, |W|, rel-change history —
+   the `M_i = f(|gA,i|, |gB,i|, gA,i·gB,i, |W_i|, history, context)` design.
+
+**Plasticity-budget sweep (τ = 0.10…0.50, meta-eval, 24 pairs):**
+
+| τ (target mean M) | old-ret gain | new-task cost | mask std |
+|---|---|---|---|
+| 0.10 | +2.91 pp | −2.55 pp | 0.042 |
+| 0.20 | +2.99 pp | −1.86 pp | 0.063 |
+| 0.30 | +2.85 pp | −1.10 pp | 0.097 |
+| 0.40 | +2.72 pp | −0.76 pp | 0.145 |
+| 0.50 | +2.18 pp | −0.81 pp | 0.240 |
+
+Monotonic frontier in the intended direction (more budget → more new-task
+learning, less protection) and mask std grows with budget — the first signs
+of a real distribution emerging at τ=0.50 (min 0.009, max 0.83).
+
+**Full 5-task live stream (frozen governor, real prior-task gradients as
+gA, post-hoc gating of the true Adam update — raw-grad gating is defeated
+by Adam's per-weight normalization):**
+
+| run | avg forgetting | final avg acc |
+|---|---|---|
+| Phase 1 plain baseline | 39.89% | 59.27% |
+| governed τ=0.30 | 39.01% | 59.82% |
+| governed τ=0.50 | 38.05% | 60.20% |
+| governed τ=0.10 | **28.51%** | **65.45%** |
+
+The tradeoff transfers from meta-training to the live stream. But the
+governed masks stay nearly uniform (std ≈ 0.01–0.1 across phases): the
+governor learned **how much** plasticity to allow, not **where**.
+At τ=0.10 old tasks retain partially (horizontal 65.4% vs 50.4% baseline,
+diagonal 64.3% vs 48.5%) at a new-task cost (xor 81.9% vs 99.1%).
+
+**Open question (Phase 2b):** can the governor learn *selective* gates
+(≈0 on old-critical weights, ≈0.2–0.5 on shared, ≈0.6–1.0 on new-task
+weights)? Proposed next experiment: direct per-weight gate parameters
+(17,249 trainable gates, no shared MLP) on the smooth 3-step horizon; if
+that finds a selective solution, re-amortize into the shared gate network.
+
 ---
 
 ## Key Design Decisions (living list)
