@@ -1,0 +1,98 @@
+Device: cuda
+============================================================
+RAIRAW-V1 — LIVE CONTINUAL LEARNING STREAM
+============================================================
+Base model parameters: 17,249  (identical to Phase 1)
+Main weight pool: 17,249  partitioned into 45 regions (<= 1000 weights)
+RAIRAW cell: 1,866 recursive params (shared, < 1K budget), pool max 20
+HRM governor (frozen, WHERE): 0 params from results_raira_v5/raira_governor_pretrained.pt
+H_MEM: empty at start, alpha=0.5, alloc blend=0.7
+  [Task 1/5 horizontal] ALLOCATION: 11 RAIRAWs (demand D=0.24) -> 11,000 weights (63.77% of 17,249)
+  [Task 1/5 horizontal] epoch 1/5 loss=0.2725 acc=94.10%
+  [Task 1/5 horizontal] epoch 2/5 loss=0.0798 acc=99.01%
+  [Task 1/5 horizontal] epoch 3/5 loss=0.0714 acc=99.31%
+  [Task 1/5 horizontal] epoch 4/5 loss=0.0745 acc=99.07%
+  [Task 1/5 horizontal] epoch 5/5 loss=0.0705 acc=99.23%
+  memory: 1 task(s) captured; H_MEM: 1 task(s) of influence reports
+  Evaluating task(s): horizontal
+    task 1   (horizontal  ) accuracy:  99.25%
+
+  [Task 2/5 vertical] ALLOCATION: 9 RAIRAWs (demand D=0.21) -> 9,000 weights (52.18% of 17,249)
+  [Task 2/5 vertical] epoch 1/5 loss=0.7119 acc=73.29%
+  [Task 2/5 vertical] epoch 2/5 loss=0.0949 acc=98.82%
+  [Task 2/5 vertical] epoch 3/5 loss=0.0743 acc=99.31%
+  [Task 2/5 vertical] epoch 4/5 loss=0.0811 acc=98.95%
+  [Task 2/5 vertical] epoch 5/5 loss=0.0782 acc=98.98%
+  memory: 2 task(s) captured; H_MEM: 2 task(s) of influence reports
+  Evaluating task(s): horizontal, vertical
+    task 1   (horizontal  ) accuracy:  49.25%
+    task 2   (vertical    ) accuracy:  99.65%
+
+  [Task 3/5 circle] ALLOCATION: 9 RAIRAWs (demand D=0.19) -> 9,000 weights (52.18% of 17,249)
+  [Task 3/5 circle] epoch 1/5 loss=0.8194 acc=66.42%
+  [Task 3/5 circle] epoch 2/5 loss=0.3380 acc=88.08%
+  [Task 3/5 circle] epoch 3/5 loss=0.1658 acc=96.05%
+  [Task 3/5 circle] epoch 4/5 loss=0.1203 acc=97.50%
+  [Task 3/5 circle] epoch 5/5 loss=0.1008 acc=98.37%
+  memory: 3 task(s) captured; H_MEM: 3 task(s) of influence reports
+  Evaluating task(s): horizontal, vertical, circle
+    task 1   (horizontal  ) accuracy:  49.85%
+    task 2   (vertical    ) accuracy:  49.15%
+    task 3   (circle      ) accuracy:  99.35%
+
+  [Task 4/5 diagonal] ALLOCATION: 9 RAIRAWs (demand D=0.21) -> 9,000 weights (52.18% of 17,249)
+  [Task 4/5 diagonal] epoch 1/5 loss=0.2567 acc=90.21%
+  [Task 4/5 diagonal] epoch 2/5 loss=0.0907 acc=98.56%
+  [Task 4/5 diagonal] epoch 3/5 loss=0.0835 acc=98.78%
+  [Task 4/5 diagonal] epoch 4/5 loss=0.0859 acc=98.51%
+  [Task 4/5 diagonal] epoch 5/5 loss=0.0790 acc=98.95%
+  memory: 4 task(s) captured; H_MEM: 4 task(s) of influence reports
+  Evaluating task(s): horizontal, vertical, circle, diagonal
+    task 1   (horizontal  ) accuracy:  75.40%
+    task 2   (vertical    ) accuracy:  73.80%
+    task 3   (circle      ) accuracy:  48.40%
+    task 4   (diagonal    ) accuracy:  98.45%
+
+  [Task 5/5 xor_quadrant] ALLOCATION: 9 RAIRAWs (demand D=0.21) -> 9,000 weights (52.18% of 17,249)
+  [Task 5/5 xor_quadrant] epoch 1/5 loss=0.7491 acc=66.64%
+  [Task 5/5 xor_quadrant] epoch 2/5 loss=0.2945 acc=89.13%
+  [Task 5/5 xor_quadrant] epoch 3/5 loss=0.1333 acc=97.00%
+  [Task 5/5 xor_quadrant] epoch 4/5 loss=0.1375 acc=96.42%
+  [Task 5/5 xor_quadrant] epoch 5/5 loss=0.1080 acc=97.88%
+  memory: 5 task(s) captured; H_MEM: 5 task(s) of influence reports
+  Evaluating task(s): horizontal, vertical, circle, diagonal, xor_quadrant
+    task 1   (horizontal  ) accuracy:  49.40%
+    task 2   (vertical    ) accuracy:  47.70%
+    task 3   (circle      ) accuracy:  49.30%
+    task 4   (diagonal    ) accuracy:  47.25%
+    task 5   (xor_quadrant) accuracy:  98.10%
+
+============================================================
+RAIRAW-V1 — RESULTS
+Main pool: 17,249 weights | RAIRAW cell: 1,866 params (frozen) | HRM governor: 0 (frozen, WHERE)
+============================================================
+
+--- ALLOCATION (WHERE) ---
+  Task 1 (horizontal  ): 11 RAIRAWs -> 11,000 weights ( 63.8% of 17,249)
+  Task 2 (vertical    ):  9 RAIRAWs ->  9,000 weights ( 52.2% of 17,249)
+  Task 3 (circle      ):  9 RAIRAWs ->  9,000 weights ( 52.2% of 17,249)
+  Task 4 (diagonal    ):  9 RAIRAWs ->  9,000 weights ( 52.2% of 17,249)
+  Task 5 (xor_quadrant):  9 RAIRAWs ->  9,000 weights ( 52.2% of 17,249)
+
+  Mean allocated capacity: 54.5% of the main pool across the stream
+  H_MEM: 5 influence report round(s), final mean influence=0.457
+
+--- RETENTION ---
+  Task 1 (horizontal  ): final 49.40% forgetting 49.85%
+  Task 2 (vertical    ): final 47.70% forgetting 51.95%
+  Task 3 (circle      ): final 49.30% forgetting 50.05%
+  Task 4 (diagonal    ): final 47.25% forgetting 51.20%
+  Task 5 (xor_quadrant): final 98.10% forgetting 0.00%
+
+  Average Forgetting: 40.61%
+  Average Forgetting (overwritten 1..4): 50.76%
+  Final Average Accuracy: 58.35%
+
+  Update fraction / task: ['63.7%', '52.1%', '52.0%', '52.0%', '52.0%']
+  Peak RAM: 1480.14 MB
+  Outputs written to results_raira_v5/live/

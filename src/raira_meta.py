@@ -94,8 +94,11 @@ def raira_burst(
     hmem_influence: float = 0.0,
     ungated: bool = False,
     meta_mode: bool = False,
+    train_governor: bool = False,
     alloc_imp: torch.Tensor | None = None,
     alloc_frac_open: float | None = None,
+    alloc_alpha: float = 0.2,
+    sparse_target: float = 0.3,
 ) -> tuple[dict[str, torch.Tensor], dict]:
     """Unroll `steps` RAIRAW-gated updates on `task`.
 
@@ -137,25 +140,62 @@ def raira_burst(
                                            device)
         hrm_masks = governor_hrm.gate_from_state(
             p_cur, g_probe, groups, xp, yp, loss_p, device,
-            differentiable=False, g_old_list=None, mem_imp_list=None,
+            differentiable=(meta_mode and train_governor),
+            g_old_list=None, mem_imp_list=None,
             mem_dir_list=None,
             hmem_list=compute_influence(g_probe, "magnitude", device=device))
-        hrm_flat = torch.cat([m.detach().flatten() for m in hrm_masks])
-        imp = region_importance(hrm_masks, groups, regions, device)
-        m_all = torch.cat([m.detach().flatten() for m in hrm_masks])
-        frac_open = float((m_all > close_threshold).float().mean())
-        hmem = HmemMemory(len(regions), alpha=0.0, device=device)
-        if alloc_imp is not None:
-            imp_use = alloc_imp
-            frac_use = alloc_frac_open
+        if meta_mode and train_governor:
+            # ---- v5 Phase B: trainable WHERE + LEARNED capacity ----
+            # importance differentiates into the governor's masks; the
+            # allocation blends EMA (stable stage) with the current masks
+            # (gradient path). The capacity demand D = cap_head(context)
+            # sets the budget: w sums to D * n_regions, so the composed
+            # meta loss trains D directly (learning pressure raises it,
+            # retention damage lowers it) — no fixed sparse target.
+            imp_raw = region_importance(hrm_masks, groups, regions, device,
+                                        detach=False)
+            hrm_flat = torch.cat([m.detach().flatten() for m in hrm_masks])
+            if alloc_imp is not None:
+                imp_use = ((1 - alloc_alpha) * alloc_imp
+                           + alloc_alpha * imp_raw)
+            else:
+                imp_use = imp_raw
+            demand = governor_hrm.capacity_demand(
+                gfeats_p, torch.zeros(3, device=device))
+            k = int(round(float(demand) * len(regions)))
+            k = max(1, min(k, pool.max_rairaw, len(regions)))
+            r_sizes = torch.tensor(
+                [regions[i].size for i in range(len(regions))],
+                device=device, dtype=torch.float32)
+            sel = imp_use + 0.05 * torch.log1p(r_sizes)
+            topk = torch.argsort(sel, descending=True)[:k]
+            tau = 0.1
+            w_topk = demand * len(regions) * torch.softmax(
+                sel[topk] / tau, dim=0)
+            active = sorted(topk.tolist())
+            pool.activate(active)
+            w_map = {int(rid): w_topk[pos]
+                     for pos, rid in enumerate(topk.tolist())}
+            imp = imp_raw.detach().clone()
+            frac_open = float(demand.detach())
         else:
-            imp_use = imp
-            frac_use = frac_open
-        active, blended = allocate_rairaws(
-            imp_use, hrm_masks, hmem, len(regions), pool.max_rairaw,
-            close_threshold=close_threshold,
-            frac_open_override=frac_use)
-        pool.activate(active)
+            hrm_flat = torch.cat([m.detach().flatten() for m in hrm_masks])
+            imp = region_importance(hrm_masks, groups, regions, device)
+            m_all = torch.cat([m.detach().flatten() for m in hrm_masks])
+            frac_open = float((m_all > close_threshold).float().mean())
+            hmem = HmemMemory(len(regions), alpha=0.0, device=device)
+            if alloc_imp is not None:
+                imp_use = alloc_imp
+                frac_use = alloc_frac_open
+            else:
+                imp_use = imp
+                frac_use = frac_open
+            active, blended = allocate_rairaws(
+                imp_use, hrm_masks, hmem, len(regions), pool.max_rairaw,
+                close_threshold=close_threshold,
+                frac_open_override=frac_use)
+            pool.activate(active)
+            w_map = None
         active_set = set(active)
 
     m_buf = [torch.zeros_like(p_cur[g.name]) for g in groups]
@@ -203,6 +243,8 @@ def raira_burst(
                     r, g_flat, p_flat, hrm_flat, mem_imp_flat,
                     g_old_hat_all, hmem_influence, gfeats,
                     alloc_frac=len(active) / len(regions), need_info=False)
+                if w_map is not None:
+                    gates_r = gates_r * w_map[r.region_id]
                 base = offs[r.group_name]
                 act_ms.append(gates_r)
                 act_idx.append(torch.arange(r.start, r.stop,
@@ -256,6 +298,8 @@ def raira_burst(
     if not ungated:
         diag["imp"] = imp.detach().clone()
         diag["frac_open"] = frac_open
+        diag["demand"] = float(demand.detach()) \
+            if (meta_mode and train_governor) else frac_open
     return p_cur, diag
 
 
@@ -338,7 +382,10 @@ def raira_meta_step(
         mem_imp=mem_imp, mem_dir=mem_dir, offs=offs,
         close_threshold=getattr(m, "close_threshold", 0.02),
         hmem_influence=hmem_influence, meta_mode=True,
-        alloc_imp=alloc_imp, alloc_frac_open=alloc_frac_open)
+        train_governor=getattr(m, "train_governor", False),
+        alloc_imp=alloc_imp, alloc_frac_open=alloc_frac_open,
+        alloc_alpha=getattr(m, "alloc_alpha", 0.2),
+        sparse_target=getattr(m, "sparse_target", 0.3))
 
     x_bv = _sample_batch(bsize, seed_offset=seed_off * 43 + 11).to(device)
     y_bv = meta_task_labels(x_bv, fam_b).to(device)
@@ -388,21 +435,37 @@ def raira_meta_step(
     lambda_after = float(getattr(m, "lambda_after", 0.3))
     lambda_old = float(getattr(m, "lambda_old", 1.0))
     lambda_sparse = float(getattr(m, "lambda_sparse", 1.0))
-    lambda_ewc = float(getattr(m, "lambda_ewc", 0.02))
+    lambda_ewc = float(getattr(m, "lambda_ewc", 0.05))
     lambda_delta = float(getattr(m, "lambda_delta", 5.0))
 
+    # v5.1: phase-scaled retention. The burst measures damage over
+    # burst_steps (20) but the live phase runs ~395 steps — burst-horizon
+    # L_old (~0.08) is ~20x smaller than the real live damage. The v1
+    # phase-scaling collapsed the SHARED cell (att died with ret); with
+    # node isolation the scaled term only reaches ret/ctrl/int/gov —
+    # attention keeps its unscaled learning objective and can still open
+    # gates (additive composition), so the asymmetry is safe now.
+    phase_scale_ret = (phase_scale if getattr(m, "phase_scale_ret", True)
+                       else 1.0)
+
     loss_att = loss_new + lambda_after * loss_new_after
-    loss_ret = lambda_old * loss_old + lambda_ewc * ewc_cost
+    loss_ret = (lambda_old * phase_scale_ret * loss_old
+                + lambda_ewc * ewc_cost)
     loss_int = loss_att + loss_ret + lambda_sparse * sparse_cost
     loss_ctrl = (loss_new
-                 + lambda_old * loss_old
+                 + lambda_old * phase_scale_ret * loss_old
                  + lambda_sparse * sparse_cost
                  + lambda_ewc * ewc_cost
                  + lambda_delta * delta_cost)
+    # v5: the governor's objective IS the composed loss. Its capacity
+    # demand D gets its gradient through the allocation budget w (which
+    # scales with D), not through any fixed-target capacity term.
+    loss_gov = loss_ctrl
     gov_loss = loss_ctrl
     model.zero_grad(set_to_none=True)
     return {
         "gov_loss": gov_loss,
+        "loss_gov": loss_gov,
         "loss_att": loss_att,
         "loss_ret": loss_ret,
         "loss_int": loss_int,
@@ -419,6 +482,7 @@ def raira_meta_step(
         "frac_active": diag["frac_active"],
         "imp": diag.get("imp"),
         "frac_open": diag.get("frac_open"),
+        "demand": diag.get("demand"),
         "loss_new_before": diag["loss_new_before"],
         "loss_new_after": diag["loss_new_after"],
         "loss_old_before": diag["loss_old_before"],
@@ -561,7 +625,7 @@ def main() -> None:
         init_mask=cfg.governor.init_mask,
         per_weight_feat_dim=pwd,
     ).to(device)
-    governor_hrm.load_state_dict(ckpt)
+    governor_hrm.load_state_dict(ckpt, strict=False)
     governor_hrm.eval()
     for p in governor_hrm.parameters():
         p.requires_grad_(False)
@@ -580,8 +644,9 @@ def main() -> None:
           f"(<= {cfg.raira.region_size} weights each)")
     print(f"RAIRAW cell params: {cell.cell_params:,}  "
           f"(budget < 1000), pool max {cfg.raira.max_rairaw}")
-    print(f"HRM governor (frozen, allocation only): "
-          f"{governor_hrm.governor_params():,} params from {args.governor}")
+    print(f"HRM governor ({'trainable' if getattr(m, 'train_governor', False) else 'frozen'}, "
+          f"WHERE + capacity demand): {governor_hrm.governor_params():,} "
+          f"params from {args.governor}")
     print(f"Objective (v3 nodes): att <- L_new+{getattr(m, 'lambda_after', 0.3)}*after; "
           f"ret <- {m.lambda_old}*L_old+{getattr(m, 'lambda_ewc', 0.02)}*EWC; "
           f"int <- composed; ctrl <- composed+{m.lambda_sparse}*sparse"
@@ -613,6 +678,15 @@ def main() -> None:
         "int": torch.optim.AdamW(cell.int_node.parameters(), lr=m.lr),
         "ctrl": torch.optim.AdamW(cell.ctrl_node.parameters(), lr=m.lr),
     }
+    train_gov = bool(getattr(m, "train_governor", False))
+    if train_gov:
+        gov_lr = float(getattr(m, "gov_lr", 1e-3))
+        gov_opt = torch.optim.AdamW(governor_hrm.parameters(), lr=gov_lr)
+        print(f"Governor: TRAINABLE (lr={gov_lr}, cap_lambda="
+              f"{getattr(m, 'gov_cap_lambda', 1.0)})")
+    else:
+        gov_opt = None
+        print("Governor: frozen (WHERE fixed)")
 
     print("Pre-warm kernels (first-batch cudnn/optimizer penalty) ...")
     xw = _sample_batch(m.batch_size, seed_offset=99_999).to(device)
@@ -640,12 +714,16 @@ def main() -> None:
                                         alloc_frac_open=ema_frac))
 
         # ---- node-isolated backward (see RairawCell docstring) ----
-        # All backwards run BEFORE any optimizer step: stepping mutates the
-        # cell params in place, which would invalidate the retained graphs.
+        # ALL backwards run BEFORE any optimizer step: stepping mutates the
+        # cell/governor params in place, which would invalidate the
+        # retained graphs (the governor's path crosses the cell's gates).
         mean_ctrl = sum(o["loss_ctrl"] for o in outs) / len(outs)
         mean_att = sum(o["loss_att"] for o in outs) / len(outs)
         mean_ret = sum(o["loss_ret"] for o in outs) / len(outs)
         mean_int = sum(o["loss_int"] for o in outs) / len(outs)
+        if train_gov:
+            for p in governor_hrm.parameters():
+                p.requires_grad_(False)
         for name, loss in (("ctrl", mean_ctrl), ("int", mean_int),
                            ("att", mean_att), ("ret", mean_ret)):
             if loss.grad_fn is None:
@@ -654,8 +732,25 @@ def main() -> None:
             node_opts[name].zero_grad(set_to_none=True)
             loss.backward(retain_graph=True)
         cell.freeze_only(cell.NODE_NAMES)
+        if train_gov:
+            mean_gov = sum(o["loss_gov"] for o in outs) / len(outs)
+            if mean_gov.grad_fn is not None:
+                cell.freeze(True)
+                for p in governor_hrm.parameters():
+                    p.requires_grad_(True)
+                gov_opt.zero_grad(set_to_none=True)
+                mean_gov.backward()
+                cell.freeze(False)
+                governor_hrm.eval()
+        # ---- steps (all in-place mutations happen here, after backwards) ----
         for opt in node_opts.values():
             opt.step()
+        if train_gov:
+            for p in governor_hrm.parameters():
+                p.requires_grad_(True)
+            gov_opt.step()
+            for p in governor_hrm.parameters():
+                p.requires_grad_(False)
 
         # WHERE EMA update (from the last sub-step's governor probe)
         o = outs[-1]
@@ -693,19 +788,24 @@ def main() -> None:
                 "phase_scale": float(o["phase_scale"]),
                 "allocated_weights": int(o["allocated_weights"]),
                 "frac_active": round(o["frac_active"], 3),
+                "demand": round(o.get("demand", 0.0), 3),
                 **{k: round(v, 4) for k, v in stats.items()},
             })
             print(f"step {step:5d}/{m.steps}  L_new={ema['L_new']:.4f} "
                   f"(b {o['loss_new_before']:.2f}->a {o['loss_new_after']:.2f}) "
                   f"L_old={ema['L_old']:.4f}  sp={ema['sparse']:.4f} "
                   f"ewc={ema['ewc']:.4f} dW={ema['delta']:.5f}  "
-                  f"| alloc {o['allocated_weights']}/{total_weights} "
-                  f"w ({100*o['frac_active']:.0f}% regions) "
+                  f"| D={o.get('demand', 0.0):.2f} alloc {o['allocated_weights']}"
+                  f"/{total_weights} w ({100*o['frac_active']:.0f}% regions) "
                   f"| mask mean={stats['mask_mean']:.3f} "
                   f"<0.1:{stats['frac_lt_0.1']:.2f}")
 
     pd.DataFrame(log).to_csv(outdir / "raira_meta_train_log.csv", index=False)
     torch.save(cell.state_dict(), outdir / "raira_cell_pretrained.pt")
+    if train_gov:
+        torch.save(governor_hrm.state_dict(),
+                   outdir / "raira_governor_pretrained.pt")
+        print(f"Saved trained governor to {outdir / 'raira_governor_pretrained.pt'}")
 
     info = {
         "steps": m.steps,

@@ -323,18 +323,23 @@ class RairawPool(nn.Module):
 
 
 class HmemMemory:
-    """H_MEM: observed memory of RAIRAW influence (§7-§10).
+    """H_MEM: observed memory of RAIRAW influence (§7-§10) + v5 capacity
+    feedback.
 
     Begins empty. Each task, every active RAIRAW reports its region's
-    influence (relative gradient magnitude observed during training);
-    H_MEM accumulates a per-region EMA of those reports and serves the
-    result back as an allocation prior and as region context.
+    influence (relative gradient magnitude observed during training) plus
+    the phase's learning response (loss improvement per unit capacity) and
+    retention damage (old-task degradation). H_MEM accumulates per-region
+    EMAs and serves summaries back as an allocation prior, region context,
+    and input to the governor's learned capacity demand.
     """
 
     def __init__(self, num_regions: int, alpha: float = 0.5,
                  device: torch.device | None = None) -> None:
         self.alpha = alpha
         self.influence = torch.zeros(num_regions, device=device)
+        self.learning_response = torch.zeros(num_regions, device=device)
+        self.retention_damage = torch.zeros(num_regions, device=device)
         self.n = 0
 
     def is_empty(self) -> bool:
@@ -344,14 +349,34 @@ class HmemMemory:
         """reports: {region_id: influence} from the active RAIRAWs."""
         if not reports:
             return
-        flat = torch.stack([
-            torch.tensor(v, dtype=torch.float32,
-                         device=self.influence.device)
-            for v in reports.values()])
         for rid, v in reports.items():
             self.influence[rid] = (self.alpha * float(v)
                                    + (1 - self.alpha) * self.influence[rid])
         self.n += 1
+
+    def update_capacity(
+        self,
+        reports: dict[int, tuple[float, float]],
+    ) -> None:
+        """{region_id: (learning_response, retention_damage)} phase reports."""
+        if not reports:
+            return
+        for rid, (lr, rd) in reports.items():
+            self.learning_response[rid] = (
+                self.alpha * lr + (1 - self.alpha) * self.learning_response[rid])
+            self.retention_damage[rid] = (
+                self.alpha * rd + (1 - self.alpha) * self.retention_damage[rid])
+
+    def summary(self) -> torch.Tensor:
+        """(3,) [mean influence, mean learning response, mean retention
+        damage], clamped to [0, 1] (0 = no feedback yet)."""
+        if self.n == 0:
+            return torch.zeros(3, device=self.influence.device)
+        return torch.stack([
+            self.influence.mean().clamp(0, 1),
+            self.learning_response.mean().clamp(0, 1),
+            self.retention_damage.mean().clamp(0, 1),
+        ])
 
     def prior(self) -> torch.Tensor:
         """Normalized per-region influence in [0, 1] (1 = most influential)."""
@@ -369,12 +394,16 @@ def region_importance(
     groups,
     regions: list[Region],
     device: torch.device,
+    detach: bool = True,
 ) -> torch.Tensor:
-    """HRM per-weight masks -> per-region importance (mean mask)."""
+    """HRM per-weight masks -> per-region importance (mean mask).
+
+    detach=False: keep the graph (governor meta-training — importance must
+    differentiate into the governor's masks)."""
     req = {}
     gnames = {g.name: i for i, g in enumerate(groups)}
     for g, m in zip(groups, masks):
-        req[g.name] = m.detach().flatten()
+        req[g.name] = (m.detach().flatten() if detach else m.flatten())
     imp = torch.zeros(len(regions), device=device)
     for r in regions:
         imp[r.region_id] = req[r.group_name][r.weight_slice].mean()
@@ -391,6 +420,9 @@ def allocate_rairaws(
     blend: float = 0.7,
     sparse_target: float = 0.3,
     frac_open_override: float | None = None,
+    k_override: int | None = None,
+    size_prior: float = 0.05,
+    region_sizes: torch.Tensor | None = None,
 ) -> tuple[list[int], torch.Tensor]:
     """HRM WHERE decision: which regions get a RAIRAW this phase.
 
@@ -401,6 +433,11 @@ def allocate_rairaws(
     so that only a bounded fraction of the 17K pool is under RAIRAW
     authority; the rest are closed nodes (remain available later).
     frac_open_override: externally EMA'd open fraction (stable K).
+    k_override: externally decided capacity (learned demand D) — used by
+    the v5 live stream; skips the frac_open formula entirely.
+    size_prior: mild structural tie-break toward larger regions —
+      regions have wildly uneven sizes (32..1000 w); with near-uniform
+      masks the argsort picks tiny noisy regions otherwise.
 
     Returns (active region ids, blended importance).
     """
@@ -409,12 +446,19 @@ def allocate_rairaws(
     else:
         blended = (blend * region_imp
                    + (1 - blend) * hmem.prior())
-    m_all = torch.cat([m.detach().flatten() for m in masks])
-    frac_open = (float((m_all > close_threshold).float().mean())
-                 if frac_open_override is None else frac_open_override)
-    k = int(round(n_regions * frac_open / max(sparse_target, 1e-3)))
-    k = max(1, min(k, max_rairaw, n_regions))
-    top = torch.argsort(blended, descending=True)[:k]
+    if k_override is not None:
+        k = max(1, min(k_override, max_rairaw, n_regions))
+    else:
+        m_all = torch.cat([m.detach().flatten() for m in masks])
+        frac_open = (float((m_all > close_threshold).float().mean())
+                     if frac_open_override is None else frac_open_override)
+        k = int(round(n_regions * frac_open / max(sparse_target, 1e-3)))
+        k = max(1, min(k, max_rairaw, n_regions))
+    if size_prior > 0.0 and region_sizes is not None:
+        sel = blended + size_prior * torch.log1p(region_sizes)
+        top = torch.argsort(sel, descending=True)[:k]
+    else:
+        top = torch.argsort(blended, descending=True)[:k]
     return sorted(top.tolist()), blended
 
 

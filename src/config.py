@@ -98,6 +98,10 @@ class MetaConfig:
                                 # + short-horizon unroll, not EWC pressure
     lambda_delta: float = 0.5   # weight of mean relative |dW| (change cost)
     lambda_after: float = 0.3   # att-node: absolute after-loss weight
+    phase_scale_ret: bool = True  # scale ret/ctrl/gov L_old by live/burst
+    train_governor: bool = False  # Phase B: train the WHERE governor in-loop
+    gov_lr: float = 1e-3        # governor optimizer learning rate
+    alloc_alpha: float = 0.2    # WHERE blend: current masks vs EMA
     distill_steps: int = 0      # node-level pretraining: regress the cell's
                                 # region gates onto the frozen governor's
                                 # per-weight masks (teacher distillation)

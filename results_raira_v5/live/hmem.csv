@@ -1,0 +1,6 @@
+task,phase,hmem_n_tasks,influence_mean,influence_max_region,influence_max,learning_response,retention_damage
+horizontal,1,1,0.5281,3,2.4857,0.0184,0.0
+vertical,2,2,0.5555,3,2.6377,0.0704,1.2958
+circle,3,3,0.5497,3,2.517,0.0798,0.6499
+diagonal,4,4,0.5145,3,2.3981,0.0197,0.0
+xor_quadrant,5,5,0.4568,3,2.116,0.0712,0.6871

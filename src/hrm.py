@@ -247,6 +247,13 @@ class HRMIntentGovernor(nn.Module):
             nn.Linear(in_dim, hidden_dim), nn.ReLU(),
             nn.Linear(hidden_dim, hidden_dim), nn.ReLU(),
             nn.Linear(hidden_dim, 1))
+        # v5 capacity-demand head: D = sigma(cap_head(global context +
+        # H_MEM summary)). Learned capacity, not a fixed sparse target:
+        # D scales the allocation budget, so the composed meta loss gives
+        # it a gradient (learning pressure raises D, retention damage
+        # lowers it). H_MEM summary: [mean influence, mean learning
+        # response, mean retention damage] (zeros when empty).
+        self.cap_head = nn.Linear(global_feat_dim + 3, 1)
         self.per_weight_feat_dim = per_weight_feat_dim
         self.global_feat_dim = global_feat_dim
 
@@ -254,6 +261,18 @@ class HRMIntentGovernor(nn.Module):
             b = math.log(init_mask / (1.0 - init_mask))
             with torch.no_grad():
                 self.mlp[-1].bias.fill_(b)
+        with torch.no_grad():
+            self.cap_head.bias.fill_(math.log(0.3 / 0.7))  # moderate default
+
+    def capacity_demand(self, global_feats: torch.Tensor,
+                        hmem_summary: torch.Tensor) -> torch.Tensor:
+        """Learned capacity demand D in (0,1): fraction of the pool budget.
+
+        global_feats: (9,) compute_global_features output.
+        hmem_summary: (3,) [mean influence, mean learning response, mean
+          retention damage] from H_MEM (zeros if empty)."""
+        return torch.sigmoid(
+            self.cap_head(torch.cat([global_feats, hmem_summary]))).squeeze(-1)
 
     # -- main API -------------------------------------------------------------
     def gate(

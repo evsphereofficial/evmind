@@ -279,7 +279,7 @@ def main() -> None:
             init_mask=cfg.governor.init_mask,
             per_weight_feat_dim=8 + (1 if hmem_mode != "none" else 0),
         ).to(device)
-    governor.load_state_dict(torch.load(args.governor, map_location=device))
+    governor.load_state_dict(torch.load(args.governor, map_location=device), strict=False)
     governor.eval()  # FROZEN governance core (§132.3): no grads, no updates
     controller = HRMController(governor, groups, device)
 

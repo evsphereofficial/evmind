@@ -112,12 +112,21 @@ class RairawStream:
             [m.detach().flatten() for m in masks])
         imp = region_importance(masks, self.groups, self.regions,
                                 self.device)
+        # v5: learned capacity demand D = cap_head(global ctx + H_MEM
+        # summary) — NOT a fixed sparse target. k = D * n_regions.
+        demand = self.governor_hrm.capacity_demand(gfeats, self.hmem.summary())
+        k = max(1, min(int(round(float(demand) * len(self.regions))),
+                       self.pool.max_rairaw))
+        r_sizes = torch.tensor([r.size for r in self.regions],
+                               device=self.device, dtype=torch.float32)
         active, blended = allocate_rairaws(
             imp, masks, self.hmem, len(self.regions), self.pool.max_rairaw,
             close_threshold=self.close_threshold, blend=self.alloc_blend,
-            sparse_target=self.sparse_target)
+            sparse_target=self.sparse_target, k_override=k,
+            region_sizes=r_sizes)
         self.active = active
         self.importance = blended
+        self.demand = float(demand)
         self.pool.reset_states(self.device)
         self.pool.activate(active)
         model.zero_grad(set_to_none=True)
@@ -126,7 +135,21 @@ class RairawStream:
             "active": list(active),
             "importance": blended,
             "mean_importance": float(blended.mean()),
+            "demand": self.demand,
         }
+
+    def grow(self) -> list[int]:
+        """v5: iterative capacity — grant one more RAIRAW (next-best
+        region by blended importance); states re-accumulate quickly."""
+        k = len(self.active) + 1
+        if k > self.pool.max_rairaw:
+            return self.active
+        order = torch.argsort(self.importance, descending=True)
+        active = sorted(order[:k].tolist())
+        self.active = active
+        self.pool.reset_states(self.device)
+        self.pool.activate(active)
+        return active
 
     @torch.no_grad()
     def compute_masks(
@@ -298,7 +321,7 @@ def main() -> None:
         refine_steps=cfg.governor.refine_steps,
         init_mask=cfg.governor.init_mask, per_weight_feat_dim=pwd,
     ).to(device)
-    governor_hrm.load_state_dict(ckpt_g)
+    governor_hrm.load_state_dict(ckpt_g, strict=False)
     governor_hrm.eval()
     for p in governor_hrm.parameters():
         p.requires_grad_(False)
@@ -341,6 +364,7 @@ def main() -> None:
     alloc_rows: list[dict] = []
     region_rows: list[dict] = []
     hmem_rows: list[dict] = []
+    growth_rows: list[dict] = []
     train_times: dict[int, float] = {}
     update_fractions: dict[int, float] = {}
     rel_changes: dict[int, float] = {}
@@ -362,6 +386,7 @@ def main() -> None:
         alloc_rows.append({
             "task": task_name, "phase": phase + 1,
             "active_rairaws": len(alloc["active"]),
+            "demand": round(alloc["demand"], 3),
             "allocated_weights": sum(r.size for r in regions
                                      if r.region_id in alloc["active"]),
             "pct_of_pool": round(100 * sum(r.size for r in regions
@@ -371,13 +396,29 @@ def main() -> None:
             "mean_importance": round(alloc["mean_importance"], 4),
         })
         print(f"  [Task {phase+1}/{num_tasks} {task_name}] ALLOCATION: "
-              f"{len(alloc['active'])} RAIRAWs -> "
-              f"{alloc_rows[-1]['allocated_weights']:,} weights "
+              f"{len(alloc['active'])} RAIRAWs (demand D={alloc['demand']:.2f})"
+              f" -> {alloc_rows[-1]['allocated_weights']:,} weights "
               f"({alloc_rows[-1]['pct_of_pool']}% of {total_weights:,})")
 
         snapshot = {n: p.detach().clone() for n, p in model.named_parameters()}
         train_start = time.perf_counter()
         last_info = []
+        def old_task_probe() -> float:
+            """Mean BCE over captured tasks (one fixed batch each)."""
+            if phase == 0:
+                return 0.0
+            with torch.no_grad():
+                losses = []
+                for i in range(phase):
+                    xp, yp = datasets[(i, "train")][:cfg.train.batch_size]
+                    losses.append(float(
+                        loss_fn(model(xp.to(device).float()),
+                                yp.to(device).float())))
+                return sum(losses) / len(losses)
+
+        prev_epoch_loss = None
+        probe_before = old_task_probe()
+        probe_prev = probe_before
         for epoch in range(cfg.train.epochs_per_task):
             loss, acc, secs, info_rows = train_one_epoch_raira(
                 model, train_loader, optimizer, loss_fn, device,
@@ -390,6 +431,34 @@ def main() -> None:
             })
             print(f"  [Task {phase+1}/{num_tasks} {task_name}] epoch {epoch+1}"
                   f"/{cfg.train.epochs_per_task} loss={loss:.4f} acc={acc:.2f}%")
+            # ---- v5: iterative capacity (RAIRAW feedback) ----
+            # The task's learning response + retention damage gate whether
+            # more capacity is granted: stalled learning with no old-task
+            # damage -> +1 RAIRAW; easy tasks keep a small allocation.
+            if prev_epoch_loss is not None:
+                improvement = ((prev_epoch_loss - loss)
+                               / max(prev_epoch_loss, 1e-6))
+                damage = old_task_probe() - probe_prev
+                growth_rows.append({
+                    "task": task_name, "phase": phase + 1, "epoch": epoch + 1,
+                    "improvement": round(improvement, 4),
+                    "damage_probe": round(damage, 4),
+                    "active_rairaws": len(stream.active),
+                    "demand": round(stream.demand, 3),
+                })
+                if (improvement < 0.005 and loss > 0.25
+                        and damage < 0.15
+                        and len(stream.active) < pool.max_rairaw):
+                    active_grown = stream.grow()
+                    growth_rows[-1].update({"grown": True,
+                                            "grown_to": len(active_grown)})
+                    print(f"    -> learning stalled (improve={improvement:.3f},"
+                          f" damage={damage:.3f}): +1 RAIRAW "
+                          f"(now {len(active_grown)})")
+                else:
+                    growth_rows[-1].update({"grown": False})
+                probe_prev = old_task_probe()
+            prev_epoch_loss = loss
         train_times[phase] = time.perf_counter() - train_start
         update_fractions[phase] = measure_update_fraction(model, snapshot)
         rel_changes[phase] = measure_rel_change(model, snapshot)
@@ -401,12 +470,23 @@ def main() -> None:
         g_all = torch.cat([g.detach().flatten() for g in g_t])
         reports = stream.report_influence(g_all)
         hmem.update(reports)
+        # v5: RAIRAWs also report their learning response and retention
+        # damage — the demand head of the next task reads these.
+        first_epoch_loss = log_rows[-(cfg.train.epochs_per_task)]["train_loss"]
+        learning_response = ((first_epoch_loss - loss)
+                             / max(1.0, len(stream.active)))
+        retention_damage = max(0.0, old_task_probe() - probe_before)
+        cap_reports = {rid: (learning_response, retention_damage)
+                       for rid in stream.active}
+        hmem.update_capacity(cap_reports)
         hmem_rows.append({
             "task": task_name, "phase": phase + 1,
             "hmem_n_tasks": hmem.n,
             "influence_mean": round(float(hmem.influence.mean()), 4),
             "influence_max_region": int(torch.argmax(hmem.influence).item()),
             "influence_max": round(float(hmem.influence.max()), 4),
+            "learning_response": round(learning_response, 4),
+            "retention_damage": round(retention_damage, 4),
         })
         model.zero_grad(set_to_none=True)
         memory.update(g_t)
@@ -445,6 +525,9 @@ def main() -> None:
     pd.DataFrame(alloc_rows).to_csv(outdir / "allocation.csv", index=False)
     pd.DataFrame(region_rows).to_csv(outdir / "region_gates.csv", index=False)
     pd.DataFrame(hmem_rows).to_csv(outdir / "hmem.csv", index=False)
+    if growth_rows:
+        pd.DataFrame(growth_rows).to_csv(outdir / "capacity_growth.csv",
+                                         index=False)
     pd.DataFrame({
         "task": task_names,
         "update_fraction_pct": [round(update_fractions[i], 3) for i in range(num_tasks)],

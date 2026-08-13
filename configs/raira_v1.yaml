@@ -88,15 +88,17 @@ meta:
   lambda_sparse: 1.0
   sparse_target: 0.3  # applies to ACTIVE weights (allocated regions only;
                       # the closed mass is ~95% of the pool)
-  lambda_ewc: 0.02  # SMALL: the old-task sensitivity field (gA_hat) is now a
-                    # per-weight cell feature; a large lambda was destructive
-                    # (5-40x the other gradients -> catatonia). L_old carries
-                    # the retention signal; EWC only sharpens it.
+  lambda_ewc: 0.05  # ret-node only (isolated): preemptive retention pressure
   lambda_delta: 5.0  # burst-movement penalty (no phase_scale: the live
                      # extrapolation collapsed the gates to ~0)
   lambda_after: 0.3  # att-node: absolute after-loss weight — makes
                      # "do nothing" (closed gates) cost real loss, so the
                      # attention node cannot collapse to catatonia
+  train_governor: true  # Phase B: retrain the frozen HRM with the cell in
+                        # the loop (composed loss; learned capacity demand D)
+  gov_lr: 0.001
+  alloc_alpha: 0.2     # WHERE blend: current masks vs EMA (stability)
+  phase_scale_ret: true  # ret/ctrl/gov L_old scaled by live/burst ratio
   eval_pairs: 24
   old_tasks_max: 2
   memory_agg: ewc

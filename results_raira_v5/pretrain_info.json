@@ -1,0 +1,28 @@
+{
+  "steps": 200,
+  "meta_batch": 4,
+  "cell_params": 1866,
+  "base_params": 17249,
+  "controlled_weights": 17249,
+  "n_regions": 45,
+  "region_size": 1000,
+  "max_rairaw": 20,
+  "h_dim": 16,
+  "intent_dim": 4,
+  "hmem_alpha": 0.5,
+  "alloc_blend": 0.7,
+  "governor_file": "/home/evsphere/projects/aiprojects/evmind/results_hmem/magnitude_governor/governor_pretrained.pt",
+  "objective": {
+    "lambda_old": 1.0,
+    "lambda_sparse": 1.0,
+    "sparse_target": 0.3,
+    "lambda_ewc": 0.02,
+    "lambda_delta": 5.0,
+    "lambda_after": 0.3
+  },
+  "memory": {
+    "old_tasks_max": 2,
+    "agg": "ewc"
+  },
+  "training_seconds": 1548.9
+}
