@@ -227,3 +227,15 @@ Peak RAM: 1419.96 MB
 ============================================================
 Outputs written to results_orders/hmem_grad/p9_s2/
 === ORDER 9 hmem=magnitude seed 0 ===
+Peak RAM: 1430.37 MB
+============================================================
+Outputs written to results_orders/hmem_magnitude/p9_s0/
+=== ORDER 9 hmem=magnitude seed 1 ===
+Peak RAM: 1430.34 MB
+============================================================
+Outputs written to results_orders/hmem_magnitude/p9_s1/
+=== ORDER 9 hmem=magnitude seed 2 ===
+Peak RAM: 1420.5 MB
+============================================================
+Outputs written to results_orders/hmem_magnitude/p9_s2/
+=== HMEM ORDER SWEEP COMPLETE ===

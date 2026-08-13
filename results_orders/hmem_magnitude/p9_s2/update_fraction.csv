@@ -1,0 +1,6 @@
+task,update_fraction_pct,mean_rel_change
+xor_quadrant,98.238,725.32632
+diagonal,99.588,9.14945
+vertical,99.571,1.33957
+circle,99.49,0.82967
+horizontal,99.49,0.74032
