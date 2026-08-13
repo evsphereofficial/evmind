@@ -13,7 +13,47 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
-from torch.nn import TransformerEncoder, TransformerEncoderLayer
+import torch.nn.functional as F
+from torch.nn import TransformerEncoder
+
+
+class _FastTransformerLayer(nn.Module):
+    """Dropped-in replacement forward for TransformerEncoderLayer.
+
+    Same parameters/naming (self_attn in_proj_weight, linear1, norms...),
+    same post-LN residual semantics, but the attention uses the fused
+    F.scaled_dot_product_attention C++ path. The stock F.multi_head_
+    attention_forward Python overhead dominates at d=32/nhead=2 and was
+    costing ~18ms per fwd+bwd on a 20K-param model.
+    """
+
+    def __init__(self, layer: nn.TransformerEncoderLayer) -> None:
+        super().__init__()
+        self.__dict__.update(layer.__dict__)
+
+    def forward(self, src, src_mask=None, src_key_padding_mask=None,
+                is_causal=False):
+        B, S, D = src.shape
+        H = self.self_attn.num_heads
+        h = self.norm1(src)
+        qkv = F.linear(h, self.self_attn.in_proj_weight,
+                       self.self_attn.in_proj_bias)
+        qkv = qkv.reshape(B, S, 3, H, D // H)
+        q, k, v = qkv[:, :, 0], qkv[:, :, 1], qkv[:, :, 2]
+        attn = F.scaled_dot_product_attention(
+            q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2))
+        attn = attn.transpose(1, 2).reshape(B, S, D)
+        attn = F.linear(attn, self.self_attn.out_proj.weight,
+                        self.self_attn.out_proj.bias)
+        x = src + F.dropout(attn, p=self.dropout1.p if self.training else 0.0,
+                            training=self.training)
+        h = self.norm2(x)
+        ffn = F.linear(h, self.linear1.weight, self.linear1.bias)
+        ffn = self.activation(ffn)
+        ffn = F.dropout(ffn, p=self.dropout2.p if self.training else 0.0,
+                        training=self.training)
+        ffn = F.linear(ffn, self.linear2.weight, self.linear2.bias)
+        return self.norm2(x + ffn)
 
 
 class TinyNumericTransformer(nn.Module):
@@ -42,7 +82,7 @@ class TinyNumericTransformer(nn.Module):
         # occupies which sequence position.
         self.pos_embedding = nn.Embedding(seq_len, embedding_dim)
 
-        encoder_layer = TransformerEncoderLayer(
+        encoder_layer = nn.TransformerEncoderLayer(
             d_model=embedding_dim,
             nhead=num_heads,
             dim_feedforward=ff_dim,
@@ -50,7 +90,9 @@ class TinyNumericTransformer(nn.Module):
             batch_first=True,
             activation="gelu",
         )
-        self.encoder = TransformerEncoder(encoder_layer, num_layers=num_layers)
+        self.encoder = TransformerEncoder(
+            _FastTransformerLayer(encoder_layer), num_layers=num_layers,
+            enable_nested_tensor=False)
 
         # Classification head: mean-pooled representation -> binary logit.
         self.head = nn.Linear(embedding_dim, 1)

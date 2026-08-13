@@ -1,0 +1,32 @@
+Device: cuda
+============================================================
+RAIRAW-V1 META-TRAINING (recursive controller)
+============================================================
+Base model params: 17,249  main weight pool: 17,249  regions: 45 (<= 1000 weights each)
+RAIRAW cell params: 762  (budget < 1000), pool max 20
+HRM governor (frozen, allocation only): 0 params from /home/evsphere/projects/aiprojects/evmind/results_hmem/magnitude_governor/governor_pretrained.pt
+Objective: L_new + 1.0*L_old + 1.0*(mean(M)-0.3)^2 + 0.02*mean(M*(gA_hat^2-1)) + 5.0*mean(|dW|/|W|)
+Meta: 4 parallel steps x 390 updates, warmup=12, burst=40x, batch=512
+H_MEM: empty per meta step; random influence context (alpha=0.5 live)
+Distill: 120 region-gate steps (teacher: frozen HRM)
+distill    1/120  cellMSE=0.0888
+distill   30/120  cellMSE=0.0020
+distill   60/120  cellMSE=0.0002
+distill   90/120  cellMSE=0.0017
+distill  120/120  cellMSE=0.0001
+step     1/390  L_new=-0.0002 (b 0.74->a 0.73) L_old=0.0000  sp=0.0015 ewc=0.0000 dW=0.00003  | alloc 2705/17249 w (44% regions) | mask mean=0.004 <0.1:1.00
+step    50/390  L_new=-0.0191 (b 0.69->a 0.66) L_old=0.0013  sp=0.0343 ewc=0.0492 dW=0.00283  | alloc 33/17249 w (4% regions) | mask mean=0.000 <0.1:1.00
+step   100/390  L_new=-0.0603 (b 1.09->a 1.02) L_old=0.0146  sp=0.0180 ewc=0.2205 dW=0.00818  | alloc 225/17249 w (13% regions) | mask mean=0.003 <0.1:0.99
+step   150/390  L_new=-0.0775 (b 0.82->a 0.73) L_old=0.0178  sp=0.0110 ewc=0.2819 dW=0.01270  | alloc 1481/17249 w (29% regions) | mask mean=0.018 <0.1:0.91
+step   200/390  L_new=-0.0818 (b 0.55->a 0.43) L_old=0.0168  sp=0.0072 ewc=0.2810 dW=0.01251  | alloc 3641/17249 w (44% regions) | mask mean=0.051 <0.1:0.79
+step   250/390  L_new=-0.0884 (b 0.75->a 0.71) L_old=0.0166  sp=0.0068 ewc=0.2834 dW=0.01409  | alloc 3673/17249 w (44% regions) | mask mean=0.043 <0.1:0.79
+step   300/390  L_new=-0.0816 (b 0.75->a 0.74) L_old=0.0155  sp=0.0079 ewc=0.2883 dW=0.01132  | alloc 1/17249 w (2% regions) | mask mean=0.000 <0.1:1.00
+step   350/390  L_new=-0.0876 (b 0.71->a 0.67) L_old=0.0135  sp=0.0174 ewc=0.2648 dW=0.00933  | alloc 2705/17249 w (44% regions) | mask mean=0.025 <0.1:0.96
+
+============================================================
+RAIRAW META-TRAINING COMPLETE
+============================================================
+Cell params: 762 controlling 17,249 weights via 45 regions (pool max 20)
+Last allocation: 2705/17249 weights active (44% regions)
+Training took 3566s
+Saved cell to results_raira_v2/raira_cell_pretrained.pt

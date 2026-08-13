@@ -134,6 +134,7 @@ class RairawStream:
         model,
         x, y, loss,
         mem_imp: list[torch.Tensor] | None,
+        ret_dir: list[torch.Tensor] | None = None,
     ) -> tuple[list[torch.Tensor], list[dict]]:
         """HOW: per-weight gates from the recursive cells (active regions);
         zeros elsewhere. Returns (masks per group, per-region info dicts)."""
@@ -144,6 +145,8 @@ class RairawStream:
                             for g in self.groups])
         mem_imp_flat = (torch.cat([v.detach().flatten() for v in mem_imp])
                         if mem_imp is not None else None)
+        ret_flat = (torch.cat([d.detach().flatten() for d in ret_dir])
+                    if ret_dir is not None else None)
         gfeats = compute_global_features(x, y, loss, g_flat, p_flat,
                                          self.device)
         full = torch.zeros_like(g_flat)
@@ -153,8 +156,9 @@ class RairawStream:
                 continue
             gates_r, info = self.pool.gate_region(
                 r, g_flat, p_flat, self.hrm_masks_flat, mem_imp_flat,
-                self.hmem.value(r.region_id), gfeats,
-                alloc_frac=len(self.active) / len(self.regions))
+                ret_flat, self.hmem.value(r.region_id), gfeats,
+                alloc_frac=len(self.active) / len(self.regions),
+                need_info=True)
             base = self.offs[r.group_name]
             full[base + r.start: base + r.stop] = gates_r
             info_rows.append({"region": r.region_id, "size": r.size, **info})
@@ -204,7 +208,9 @@ def train_one_epoch_raira(
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
         mem_imp = memory.importance() if memory is not None and not memory.is_empty() else None
-        masks, info_rows = stream.compute_masks(model, x, y, loss, mem_imp)
+        ret_dir = memory.direction() if memory is not None and not memory.is_empty() else None
+        masks, info_rows = stream.compute_masks(model, x, y, loss, mem_imp,
+                                                ret_dir)
         pre = {g.name: g.param.detach().clone()
                for g in stream.groups}
         optimizer.step()
@@ -298,7 +304,7 @@ def main() -> None:
         p.requires_grad_(False)
 
     cell = RairawCell(h_dim=cfg.raira.h_dim, intent_dim=cfg.raira.intent_dim,
-                      ctx_dim=7 + 2 + 9, fw_dim=4).to(device)
+                      ctx_dim=7 + 2 + 9, fw_dim=5).to(device)
     cell.load_state_dict(torch.load(args.cell, map_location=device))
     cell.eval()
     for p in cell.parameters():

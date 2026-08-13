@@ -15,3 +15,18 @@ distill   60/120  cellMSE=0.0001
 distill   90/120  cellMSE=0.0017
 distill  120/120  cellMSE=0.0001
 step     1/390  L_new=0.0146 L_old=0.0000  sp=0.0015 ewc=0.0000 dW=0.00003  | alloc 2705/17249 w (44% regions) | mask mean=0.004 <0.1:1.00
+step    50/390  L_new=0.4792 L_old=0.1642  sp=0.0325 ewc=0.0550 dW=0.00304  | alloc 33/17249 w (4% regions) | mask mean=0.000 <0.1:1.00
+step   100/390  L_new=0.6602 L_old=0.2767  sp=0.0155 ewc=0.2552 dW=0.00915  | alloc 225/17249 w (13% regions) | mask mean=0.004 <0.1:0.99
+step   150/390  L_new=0.6363 L_old=0.3106  sp=0.0092 ewc=0.3102 dW=0.01349  | alloc 1481/17249 w (29% regions) | mask mean=0.019 <0.1:0.91
+step   200/390  L_new=0.6703 L_old=0.2966  sp=0.0060 ewc=0.3073 dW=0.01311  | alloc 3641/17249 w (44% regions) | mask mean=0.055 <0.1:0.79
+step   250/390  L_new=0.6817 L_old=0.2852  sp=0.0055 ewc=0.3136 dW=0.01485  | alloc 3673/17249 w (44% regions) | mask mean=0.042 <0.1:0.79
+step   300/390  L_new=0.7341 L_old=0.2632  sp=0.0053 ewc=0.3106 dW=0.01235  | alloc 1/17249 w (2% regions) | mask mean=0.000 <0.1:1.00
+step   350/390  L_new=0.6882 L_old=0.2910  sp=0.0104 ewc=0.2922 dW=0.01120  | alloc 2705/17249 w (44% regions) | mask mean=0.025 <0.1:0.96
+
+============================================================
+RAIRAW META-TRAINING COMPLETE
+============================================================
+Cell params: 761 controlling 17,249 weights via 45 regions (pool max 20)
+Last allocation: 2705/17249 weights active (44% regions)
+Training took 3505s
+Saved cell to results_raira/raira_cell_pretrained.pt

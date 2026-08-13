@@ -82,16 +82,19 @@ class RairawCell(nn.Module):
         W_h: 16 x 32 + 16      = 528  (recurrence)
         R  : 17,  A: 17          =  34  (retention / attention heads)
         I  : 4 x 32 + 4         = 132  (intent head)
-        C  : 1 x (4+16+1+1+4)+1  =  27  (per-weight controller head)
-        total                   = 721  parameters  (< 1,000, doc section 3)
+        C  : 1 x (5+16+1+1+4)+1  =  29  (per-weight controller head)
+        total                   = 723  parameters  (< 1,000, doc section 3)
 
     ctx_t per region+step (16 dims):
         region aggregates     7: mean|g|, mean|p|, mean|gp|, log1p(mean g^2),
                                 mean HRM mask (governor signal), mean I_mem
                                 importance, H_MEM influence feedback
         global context        9: compute_global_features (batch/task state)
-    per-weight features f_i (4 dims):
-        log1p|g_i|, log1p|p_i|, position-in-region, log1p(I_mem_i)
+    per-weight features f_i (5 dims):
+        log1p|g_i|, log1p|p_i|, position-in-region, log1p(I_mem_i),
+        log1p(ret_i)   <-- old-task sensitivity field (gA_hat, normalized):
+        the exact quantity the meta objective judges; gives the Retention
+        node explicit knowledge of "how dangerous is this weight"
 
     The controller head maps [f_i; R; A; I; h] -> gate in (0, 1).
     """
@@ -129,13 +132,16 @@ class RairawCell(nn.Module):
         return r, a, i
 
     def step(self, h: torch.Tensor, ctx: torch.Tensor,
-             fw: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, dict]:
+             fw: torch.Tensor, need_info: bool = False
+             ) -> tuple[torch.Tensor, torch.Tensor, dict]:
         """One recursive step.
 
         Args:
             h: (h_dim,) recurrent state (region's RAIRAW state).
             ctx: (ctx_dim,) region+global context (no per-weight info).
             fw: (n, fw_dim) per-weight features of the region.
+            need_info: compute R/A/I scalar logging (GPU->CPU syncs; only
+              the live logger needs it — the meta burst passes False).
         Returns:
             (h_new, gates, info) where gates: (n,), info: {R, A, I, adapter_need}.
         """
@@ -149,6 +155,8 @@ class RairawCell(nn.Module):
             i.unsqueeze(0).expand(fw.shape[0], -1),
             h_new.unsqueeze(0).expand(fw.shape[0], -1),
         ], dim=-1)).sigmoid().squeeze(-1)
+        if not need_info:
+            return h_new, g, {}
         # adapter need: high attention on a highly-retained region
         adapter_need = float((a * r).clamp(0, 1).item())
         return h_new, g, {"R": float(r.item()), "A": float(a.item()),
@@ -195,8 +203,10 @@ def per_weight_features(
     p_flat: torch.Tensor,
     mem_imp: torch.Tensor | None,
     region: Region,
+    ret_flat: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Per-weight features (n, 4): log1p|g|, log1p|p|, pos-frac, log1p I_mem."""
+    """Per-weight features (n, 5): log1p|g|, log1p|p|, pos-frac, log1p I_mem,
+    log1p|ret| (normalized old-task sensitivity field gA_hat)."""
     w = region.weight_slice
     g_r, p_r = g_flat[w], p_flat[w]
     eps = 1e-12
@@ -206,11 +216,16 @@ def per_weight_features(
         mem_r = torch.zeros_like(g_r)
     else:
         mem_r = mem_imp[w]
+    if ret_flat is None:
+        ret_r = torch.zeros_like(g_r)
+    else:
+        ret_r = ret_flat[w]
     return torch.stack([
         torch.log1p(g_r.abs() + eps),
         torch.log1p(p_r.abs() + eps),
         pos,
         torch.log1p(mem_r.abs() + eps),
+        torch.log1p(ret_r.abs() + eps),
     ], dim=-1)
 
 
@@ -253,9 +268,11 @@ class RairawPool(nn.Module):
         p_flat: torch.Tensor,
         hrm_mask_flat: torch.Tensor,
         mem_imp: torch.Tensor | None,
+        ret_flat: torch.Tensor | None,
         hmem_influence: float,
         global_feats: torch.Tensor,
         alloc_frac: float,
+        need_info: bool = False,
     ) -> tuple[torch.Tensor, dict]:
         """One recursive step for one active region; returns (gates, info).
 
@@ -266,8 +283,9 @@ class RairawPool(nn.Module):
         ctx = region_context(g_flat, p_flat, hrm_mask_flat, mem_imp,
                              hmem_influence, global_feats, region,
                              alloc_frac, region.size / self.total_weights)
-        fw = per_weight_features(g_flat, p_flat, mem_imp, region)
-        h_new, gates, info = self.cell.step(self._states[slot], ctx, fw)
+        fw = per_weight_features(g_flat, p_flat, mem_imp, region, ret_flat)
+        h_new, gates, info = self.cell.step(self._states[slot], ctx, fw,
+                                            need_info=need_info)
         self._states[slot] = h_new
         return gates, info
 

@@ -183,8 +183,8 @@ def raira_burst(
                     continue
                 gates_r, info_r = pool.gate_region(
                     r, g_flat, p_flat, hrm_flat, mem_imp_flat,
-                    hmem_influence, gfeats,
-                    alloc_frac=len(active) / len(regions))
+                    g_old_hat_all, hmem_influence, gfeats,
+                    alloc_frac=len(active) / len(regions), need_info=False)
                 base = offs[r.group_name]
                 act_ms.append(gates_r)
                 act_idx.append(torch.arange(r.start, r.stop,
@@ -291,6 +291,23 @@ def raira_meta_step(
     # H_MEM begins empty each meta step; randomize the influence context so
     # the channel is meaningful when the live stream accumulates reports.
     hmem_influence = float(torch.rand(1, generator=rng)[0])
+
+    # PRE-BURST baselines (post-A-warmup state): the objective measures
+    # CAUSAL deltas, not absolutes. An unlearned B costs only ~0.3-0.7
+    # while a destroyed A costs ~1.5-1.9; absolute losses make "protect
+    # A at all costs" dominate and collapse the gates.
+    x_nb = _sample_batch(bsize, seed_offset=seed_off * 43 + 11).to(device)
+    y_nb = meta_task_labels(x_nb, fam_b).to(device)
+    loss_new_before = BCE(functional_call(model, p_cur, (x_nb,)), y_nb)
+    old_before = []
+    for t_i, fam_a in enumerate(old_tasks):
+        x_ab = _sample_batch(bsize,
+                             seed_offset=seed_off * 41 + 9 + t_i * 19).to(device)
+        y_ab = meta_task_labels(x_ab, fam_a).to(device)
+        old_before.append(BCE(functional_call(model, p_cur, (x_ab,)), y_ab))
+    loss_old_before = (torch.stack(old_before).mean() if old_before
+                       else loss_new_before.detach() * 0.0)
+
     p_cur, diag = raira_burst(
         model, pool, groups, regions, governor_hrm, p_cur, fam_b,
         lr=base_lr, steps=m.burst_steps, batch_size=bsize,
@@ -301,15 +318,24 @@ def raira_meta_step(
 
     x_bv = _sample_batch(bsize, seed_offset=seed_off * 43 + 11).to(device)
     y_bv = meta_task_labels(x_bv, fam_b).to(device)
-    loss_new = BCE(functional_call(model, p_cur, (x_bv,)), y_bv)
+    loss_new_after = BCE(functional_call(model, p_cur, (x_bv,)), y_bv)
 
     old_losses = []
     for t_i, fam_a in enumerate(old_tasks):
         x_av = _sample_batch(bsize, seed_offset=seed_off * 41 + 9 + t_i * 19).to(device)
         y_av = meta_task_labels(x_av, fam_a).to(device)
         old_losses.append(BCE(functional_call(model, p_cur, (x_av,)), y_av))
-    loss_old = torch.stack(old_losses).mean() if old_losses else (
-        loss_new.detach() * 0.0)
+    loss_old_after = (torch.stack(old_losses).mean() if old_losses else
+                      loss_new_after.detach() * 0.0)
+
+    loss_new = loss_new_after - loss_new_before.detach()
+    loss_old = (loss_old_after - loss_old_before.detach()).clamp(min=0.0)
+    diag.update({
+        "loss_new_after": float(loss_new_after.detach()),
+        "loss_new_before": float(loss_new_before.detach()),
+        "loss_old_after": float(loss_old_after.detach()),
+        "loss_old_before": float(loss_old_before.detach()),
+    })
 
     dW = torch.cat([(p_cur[g.name] - p0[g.name]).abs().flatten()
                     for g in groups])
@@ -348,6 +374,10 @@ def raira_meta_step(
         "mask_stats": diag["mask_log"][-1],
         "allocated_weights": diag["allocated_weights"],
         "frac_active": diag["frac_active"],
+        "loss_new_before": diag["loss_new_before"],
+        "loss_new_after": diag["loss_new_after"],
+        "loss_old_before": diag["loss_old_before"],
+        "loss_old_after": diag["loss_old_after"],
     }
 
 
@@ -404,9 +434,9 @@ def distill_cell(
         for rid in sorted(pool.active):
             r = regions[rid]
             gates_r, _ = pool.gate_region(
-                r, g_flat, p_flat, hrm_flat, None,
+                r, g_flat, p_flat, hrm_flat, None, None,
                 float(torch.rand(1, generator=rng)[0]), gfeats,
-                alloc_frac=len(pool.active) / len(regions))
+                alloc_frac=len(pool.active) / len(regions), need_info=False)
             base = offs[r.group_name]
             target = hrm_flat[base + r.start: base + r.stop]
             total = total + F.mse_loss(gates_r, target)
@@ -454,6 +484,8 @@ def main() -> None:
     set_seed(cfg.train.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     torch.backends.cudnn.benchmark = True
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
     print(f"Device: {device}")
 
     model = TinyNumericTransformer(
@@ -491,7 +523,7 @@ def main() -> None:
         p.requires_grad_(False)
 
     cell = RairawCell(h_dim=cfg.raira.h_dim, intent_dim=cfg.raira.intent_dim,
-                      ctx_dim=7 + 2 + 9, fw_dim=4).to(device)
+                      ctx_dim=7 + 2 + 9, fw_dim=5).to(device)
     pool = RairawPool(cell, max_rairaw=cfg.raira.max_rairaw,
                               total_weights=total_weights).to(device)
 
@@ -531,6 +563,16 @@ def main() -> None:
     log: list[dict] = []
     ema = {"L_new": 0.0, "L_old": 0.0, "sparse": 0.0, "ewc": 0.0, "delta": 0.0}
 
+    print("Pre-warm kernels (first-batch cudnn/optimizer penalty) ...")
+    xw = _sample_batch(m.batch_size, seed_offset=99_999).to(device)
+    warmup_opt = torch.optim.AdamW(model.parameters(), lr=m.warmup_lr)
+    yw = torch.rand(m.batch_size).to(device)
+    warmup_opt.zero_grad(set_to_none=True)
+    BCE(model(xw), yw).backward()
+    warmup_opt.step()
+    reset_model(model)
+    torch.cuda.synchronize()
+
     for step in range(1, m.steps + 1):
         outs = []
         for k in range(m.meta_batch):
@@ -556,7 +598,11 @@ def main() -> None:
                 "step": step,
                 "gov_loss": float(total_loss.detach()),
                 "loss_new": float(o["loss_new"].detach()),
+                "loss_new_before": round(o["loss_new_before"], 4),
+                "loss_new_after": round(o["loss_new_after"], 4),
                 "loss_old": float(o["loss_old"].detach()),
+                "loss_old_before": round(o["loss_old_before"], 4),
+                "loss_old_after": round(o["loss_old_after"], 4),
                 "sparse_cost": float(o["sparse_cost"].detach()),
                 "ewc_cost": float(o["ewc_cost"].detach()),
                 "delta_cost": float(o["delta_cost"].detach()),
@@ -567,6 +613,7 @@ def main() -> None:
                 **{k: round(v, 4) for k, v in stats.items()},
             })
             print(f"step {step:5d}/{m.steps}  L_new={ema['L_new']:.4f} "
+                  f"(b {o['loss_new_before']:.2f}->a {o['loss_new_after']:.2f}) "
                   f"L_old={ema['L_old']:.4f}  sp={ema['sparse']:.4f} "
                   f"ewc={ema['ewc']:.4f} dW={ema['delta']:.5f}  "
                   f"| alloc {o['allocated_weights']}/{total_weights} "

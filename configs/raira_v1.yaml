@@ -72,13 +72,12 @@ raira:
   close_threshold: 0.02  # gates below this = closed nodes (as HRM system)
 
 meta:
-  steps: 390          # same update count as the HRM governor meta-training
+  steps: 200          # delta objective converges fast; 200 x mb4 ~= 10 min
   meta_batch: 4
   batch_size: 512
-  warmup_batches: 12
+  warmup_batches: 8
   warmup_lr: 0.002
-  burst_steps: 40     # horizon-matched: ~1/10 of the live phase (395 steps),
-                      # so L_new/L_old measure real learning in the burst
+  burst_steps: 20     # delta losses are local (after-before), no long horizon needed
   distill_steps: 120  # node-level pretraining from the frozen governor
   distill_lr: 0.01
   lr: 0.001
@@ -89,7 +88,10 @@ meta:
   lambda_sparse: 1.0
   sparse_target: 0.3  # applies to ACTIVE weights (allocated regions only;
                       # the closed mass is ~95% of the pool)
-  lambda_ewc: 0.3
+  lambda_ewc: 0.02  # SMALL: the old-task sensitivity field (gA_hat) is now a
+                    # per-weight cell feature; a large lambda was destructive
+                    # (5-40x the other gradients -> catatonia). L_old carries
+                    # the retention signal; EWC only sharpens it.
   lambda_delta: 5.0  # burst-movement penalty (no phase_scale: the live
                      # extrapolation collapsed the gates to ~0)
   eval_pairs: 24
