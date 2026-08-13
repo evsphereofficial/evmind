@@ -1,0 +1,229 @@
+=== ORDER 0 hmem=grad seed 0 ===
+Peak RAM: 1416.22 MB
+============================================================
+Outputs written to results_orders/hmem_grad/p0_s0/
+=== ORDER 0 hmem=grad seed 1 ===
+Peak RAM: 1417.3 MB
+============================================================
+Outputs written to results_orders/hmem_grad/p0_s1/
+=== ORDER 0 hmem=grad seed 2 ===
+Peak RAM: 1420.71 MB
+============================================================
+Outputs written to results_orders/hmem_grad/p0_s2/
+=== ORDER 0 hmem=magnitude seed 0 ===
+Peak RAM: 1415.71 MB
+============================================================
+Outputs written to results_orders/hmem_magnitude/p0_s0/
+=== ORDER 0 hmem=magnitude seed 1 ===
+Peak RAM: 1420.21 MB
+============================================================
+Outputs written to results_orders/hmem_magnitude/p0_s1/
+=== ORDER 0 hmem=magnitude seed 2 ===
+Peak RAM: 1430.47 MB
+============================================================
+Outputs written to results_orders/hmem_magnitude/p0_s2/
+=== ORDER 1 hmem=grad seed 0 ===
+Peak RAM: 1430.28 MB
+============================================================
+Outputs written to results_orders/hmem_grad/p1_s0/
+=== ORDER 1 hmem=grad seed 1 ===
+Peak RAM: 1430.3 MB
+============================================================
+Outputs written to results_orders/hmem_grad/p1_s1/
+=== ORDER 1 hmem=grad seed 2 ===
+Peak RAM: 1430.51 MB
+============================================================
+Outputs written to results_orders/hmem_grad/p1_s2/
+=== ORDER 1 hmem=magnitude seed 0 ===
+Peak RAM: 1419.84 MB
+============================================================
+Outputs written to results_orders/hmem_magnitude/p1_s0/
+=== ORDER 1 hmem=magnitude seed 1 ===
+Peak RAM: 1419.61 MB
+============================================================
+Outputs written to results_orders/hmem_magnitude/p1_s1/
+=== ORDER 1 hmem=magnitude seed 2 ===
+Peak RAM: 1420.16 MB
+============================================================
+Outputs written to results_orders/hmem_magnitude/p1_s2/
+=== ORDER 2 hmem=grad seed 0 ===
+Peak RAM: 1417.42 MB
+============================================================
+Outputs written to results_orders/hmem_grad/p2_s0/
+=== ORDER 2 hmem=grad seed 1 ===
+Peak RAM: 1420.4 MB
+============================================================
+Outputs written to results_orders/hmem_grad/p2_s1/
+=== ORDER 2 hmem=grad seed 2 ===
+Peak RAM: 1420.45 MB
+============================================================
+Outputs written to results_orders/hmem_grad/p2_s2/
+=== ORDER 2 hmem=magnitude seed 0 ===
+Peak RAM: 1419.9 MB
+============================================================
+Outputs written to results_orders/hmem_magnitude/p2_s0/
+=== ORDER 2 hmem=magnitude seed 1 ===
+Peak RAM: 1419.75 MB
+============================================================
+Outputs written to results_orders/hmem_magnitude/p2_s1/
+=== ORDER 2 hmem=magnitude seed 2 ===
+Peak RAM: 1430.57 MB
+============================================================
+Outputs written to results_orders/hmem_magnitude/p2_s2/
+=== ORDER 3 hmem=grad seed 0 ===
+Peak RAM: 1420.5 MB
+============================================================
+Outputs written to results_orders/hmem_grad/p3_s0/
+=== ORDER 3 hmem=grad seed 1 ===
+Peak RAM: 1430.81 MB
+============================================================
+Outputs written to results_orders/hmem_grad/p3_s1/
+=== ORDER 3 hmem=grad seed 2 ===
+Peak RAM: 1419.91 MB
+============================================================
+Outputs written to results_orders/hmem_grad/p3_s2/
+=== ORDER 3 hmem=magnitude seed 0 ===
+Peak RAM: 1420.78 MB
+============================================================
+Outputs written to results_orders/hmem_magnitude/p3_s0/
+=== ORDER 3 hmem=magnitude seed 1 ===
+Peak RAM: 1417.31 MB
+============================================================
+Outputs written to results_orders/hmem_magnitude/p3_s1/
+=== ORDER 3 hmem=magnitude seed 2 ===
+Peak RAM: 1416.07 MB
+============================================================
+Outputs written to results_orders/hmem_magnitude/p3_s2/
+=== ORDER 4 hmem=grad seed 0 ===
+Peak RAM: 1420.36 MB
+============================================================
+Outputs written to results_orders/hmem_grad/p4_s0/
+=== ORDER 4 hmem=grad seed 1 ===
+Peak RAM: 1430.46 MB
+============================================================
+Outputs written to results_orders/hmem_grad/p4_s1/
+=== ORDER 4 hmem=grad seed 2 ===
+Peak RAM: 1417.16 MB
+============================================================
+Outputs written to results_orders/hmem_grad/p4_s2/
+=== ORDER 4 hmem=magnitude seed 0 ===
+Peak RAM: 1420.47 MB
+============================================================
+Outputs written to results_orders/hmem_magnitude/p4_s0/
+=== ORDER 4 hmem=magnitude seed 1 ===
+Peak RAM: 1430.76 MB
+============================================================
+Outputs written to results_orders/hmem_magnitude/p4_s1/
+=== ORDER 4 hmem=magnitude seed 2 ===
+Peak RAM: 1430.27 MB
+============================================================
+Outputs written to results_orders/hmem_magnitude/p4_s2/
+=== ORDER 5 hmem=grad seed 0 ===
+Peak RAM: 1415.7 MB
+============================================================
+Outputs written to results_orders/hmem_grad/p5_s0/
+=== ORDER 5 hmem=grad seed 1 ===
+Peak RAM: 1416.24 MB
+============================================================
+Outputs written to results_orders/hmem_grad/p5_s1/
+=== ORDER 5 hmem=grad seed 2 ===
+Peak RAM: 1420.09 MB
+============================================================
+Outputs written to results_orders/hmem_grad/p5_s2/
+=== ORDER 5 hmem=magnitude seed 0 ===
+Peak RAM: 1415.79 MB
+============================================================
+Outputs written to results_orders/hmem_magnitude/p5_s0/
+=== ORDER 5 hmem=magnitude seed 1 ===
+Peak RAM: 1417.16 MB
+============================================================
+Outputs written to results_orders/hmem_magnitude/p5_s1/
+=== ORDER 5 hmem=magnitude seed 2 ===
+Peak RAM: 1430.15 MB
+============================================================
+Outputs written to results_orders/hmem_magnitude/p5_s2/
+=== ORDER 6 hmem=grad seed 0 ===
+Peak RAM: 1430.16 MB
+============================================================
+Outputs written to results_orders/hmem_grad/p6_s0/
+=== ORDER 6 hmem=grad seed 1 ===
+Peak RAM: 1420.08 MB
+============================================================
+Outputs written to results_orders/hmem_grad/p6_s1/
+=== ORDER 6 hmem=grad seed 2 ===
+Peak RAM: 1417.29 MB
+============================================================
+Outputs written to results_orders/hmem_grad/p6_s2/
+=== ORDER 6 hmem=magnitude seed 0 ===
+Peak RAM: 1419.6 MB
+============================================================
+Outputs written to results_orders/hmem_magnitude/p6_s0/
+=== ORDER 6 hmem=magnitude seed 1 ===
+Peak RAM: 1420.84 MB
+============================================================
+Outputs written to results_orders/hmem_magnitude/p6_s1/
+=== ORDER 6 hmem=magnitude seed 2 ===
+Peak RAM: 1417.22 MB
+============================================================
+Outputs written to results_orders/hmem_magnitude/p6_s2/
+=== ORDER 7 hmem=grad seed 0 ===
+Peak RAM: 1417.11 MB
+============================================================
+Outputs written to results_orders/hmem_grad/p7_s0/
+=== ORDER 7 hmem=grad seed 1 ===
+Peak RAM: 1430.73 MB
+============================================================
+Outputs written to results_orders/hmem_grad/p7_s1/
+=== ORDER 7 hmem=grad seed 2 ===
+Peak RAM: 1420.64 MB
+============================================================
+Outputs written to results_orders/hmem_grad/p7_s2/
+=== ORDER 7 hmem=magnitude seed 0 ===
+Peak RAM: 1421.11 MB
+============================================================
+Outputs written to results_orders/hmem_magnitude/p7_s0/
+=== ORDER 7 hmem=magnitude seed 1 ===
+Peak RAM: 1416.02 MB
+============================================================
+Outputs written to results_orders/hmem_magnitude/p7_s1/
+=== ORDER 7 hmem=magnitude seed 2 ===
+Peak RAM: 1420.57 MB
+============================================================
+Outputs written to results_orders/hmem_magnitude/p7_s2/
+=== ORDER 8 hmem=grad seed 0 ===
+Peak RAM: 1416.46 MB
+============================================================
+Outputs written to results_orders/hmem_grad/p8_s0/
+=== ORDER 8 hmem=grad seed 1 ===
+Peak RAM: 1417.64 MB
+============================================================
+Outputs written to results_orders/hmem_grad/p8_s1/
+=== ORDER 8 hmem=grad seed 2 ===
+Peak RAM: 1419.73 MB
+============================================================
+Outputs written to results_orders/hmem_grad/p8_s2/
+=== ORDER 8 hmem=magnitude seed 0 ===
+Peak RAM: 1417.52 MB
+============================================================
+Outputs written to results_orders/hmem_magnitude/p8_s0/
+=== ORDER 8 hmem=magnitude seed 1 ===
+Peak RAM: 1420.57 MB
+============================================================
+Outputs written to results_orders/hmem_magnitude/p8_s1/
+=== ORDER 8 hmem=magnitude seed 2 ===
+Peak RAM: 1417.5 MB
+============================================================
+Outputs written to results_orders/hmem_magnitude/p8_s2/
+=== ORDER 9 hmem=grad seed 0 ===
+Peak RAM: 1417.41 MB
+============================================================
+Outputs written to results_orders/hmem_grad/p9_s0/
+=== ORDER 9 hmem=grad seed 1 ===
+Peak RAM: 1420.02 MB
+============================================================
+Outputs written to results_orders/hmem_grad/p9_s1/
+=== ORDER 9 hmem=grad seed 2 ===
+Peak RAM: 1419.96 MB
+============================================================
+Outputs written to results_orders/hmem_grad/p9_s2/
+=== ORDER 9 hmem=magnitude seed 0 ===

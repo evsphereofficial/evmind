@@ -118,6 +118,8 @@ class ExperimentConfig:
     train: TrainConfig = field(default_factory=TrainConfig)
     governor: GovernorConfig = field(default_factory=GovernorConfig)
     meta: MetaConfig = field(default_factory=MetaConfig)
+    hmem_mode: str = "none"  # input-driven weight-influence channel:
+                             # none | grad | random | shuffled | magnitude
 
     @property
     def num_tasks(self) -> int:
@@ -167,4 +169,5 @@ def load_config(path: str) -> ExperimentConfig:
         train=train,
         governor=governor,
         meta=meta,
+        hmem_mode=str(raw.get("hmem", {}).get("mode", "none")),
     )

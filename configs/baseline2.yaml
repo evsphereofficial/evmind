@@ -5,6 +5,17 @@
 
 run_name: phase2_hrm
 
+# Input-driven weight-influence channel (h_mem) for the HRM.
+#   none       = no influence channel (legacy governor)
+#   grad       = I_i = |dL/dW_i|, batch-normalized to mean 1 (raw influence)
+#   random     = random map with the same mean=1 profile (control)
+#   shuffled   = true influence field, weight positions permuted (control)
+#   magnitude  = module-level mean magnitude only, broadcast (location dropped)
+# The governor ALWAYS outputs gates for all 17,249 weights; h_mem is
+# prioritized-influence CONTEXT, never a hard mask or routing restriction.
+hmem:
+  mode: none
+
 # Dataset sizes per task (identical to Phase 1 run).
 train_samples: 10000
 test_samples: 2000

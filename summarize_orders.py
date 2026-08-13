@@ -27,13 +27,14 @@ def metrics_for(stream_dir: Path) -> dict:
 
 
 rows = []
+HMEM_VARIANTS = ["grad", "magnitude"]
 for _, r in ORDERS.iterrows():
     p = int(r.perm)
     order = r.order
     for s in range(N_SEED):
         base = metrics_for(ROOT / "base" / f"p{p}_s{s}")
         gov = metrics_for(ROOT / "gov" / f"p{p}_s{s}")
-        rows.append({
+        row = {
             "perm": p, "order": order, "seed": s,
             "base_forgetting": base["avg_forgetting"],
             "gov_forgetting": gov["avg_forgetting"],
@@ -44,7 +45,13 @@ for _, r in ORDERS.iterrows():
             "base_final": base["final_accuracy"],
             "gov_final": gov["final_accuracy"],
             "diff_final": gov["final_accuracy"] - base["final_accuracy"],
-        })
+        }
+        for mode in HMEM_VARIANTS:
+            m = metrics_for(ROOT / f"hmem_{mode}" / f"p{p}_s{s}")
+            row[f"{mode}_forgetting"] = m["avg_forgetting"]
+            row[f"{mode}_overwritten"] = m["overwritten_forgetting"]
+            row[f"{mode}_final"] = m["final_accuracy"]
+        rows.append(row)
 df = pd.DataFrame(rows)
 df.to_csv(ROOT / "order_runs.csv", index=False)
 
@@ -71,3 +78,14 @@ for label, bcol, gcol, dcol in [
           f"governor {g.mean():7.2f} +/- {g.std(ddof=1):5.2f} | "
           f"paired diff {d.mean():+7.2f} +/- {d.std(ddof=1):5.2f} "
           f"(gov wins {int((d < 0).sum()) if label != 'final_accuracy' else int((d > 0).sum())}/30)")
+
+if all(f"{m}_forgetting" in df.columns for m in HMEM_VARIANTS):
+    print("\nh_mem variants vs plain governor (paired over the same 30 runs):")
+    for mode in HMEM_VARIANTS:
+        d_f = df[f"{mode}_forgetting"] - df.gov_forgetting
+        d_o = df[f"{mode}_overwritten"] - df.gov_overwritten
+        d_a = df[f"{mode}_final"] - df.gov_final
+        print(f"  {mode:<10} avg_forgetting {d_f.mean():+7.2f} +/- {d_f.std(ddof=1):5.2f} "
+              f"({int((d_f < 0).sum())}/30) | overwritten {d_o.mean():+7.2f} "
+              f"({int((d_o < 0).sum())}/30) | final_acc {d_a.mean():+7.2f} "
+              f"({int((d_a > 0).sum())}/30)")

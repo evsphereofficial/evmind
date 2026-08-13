@@ -30,7 +30,7 @@ from .dataset import generate_dataset
 from .evaluate import evaluate
 from .experiment import make_optimizer, plot_accuracy_matrix, set_seed
 from .hrm import (
-    build_module_groups, DirectGateGovernor, HRMController,
+    build_module_groups, compute_influence, DirectGateGovernor, HRMController,
     HRMIntentGovernor, mask_stats, SensitivityMemory,
     measure_rel_change, measure_update_fraction,
 )
@@ -87,6 +87,7 @@ def train_one_epoch_gated(
     snapshot: dict[str, torch.Tensor],
     memory: SensitivityMemory | None = None,
     close_threshold: float = 0.02,
+    hmem_mode: str = "none",
 ) -> tuple[float, float, float]:
     """One epoch with governor-gated gradient updates (§17 control_update)."""
     model.train()
@@ -103,11 +104,17 @@ def train_one_epoch_gated(
 
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
+        # input-driven influence probe (h_mem): the current batch's
+        # per-weight influence field, derived from the SAME backward;
+        # pure context for the governor — no weight touched, no routing
+        hmem_list = compute_influence(
+            [g.param.grad for g in controller.groups], hmem_mode,
+            seed_base=phase * 100_000 + step, device=device)
         # read-only gates from the governor (sees raw gB in .grad;
         # gA = immediate old-task gradient, memory = accumulated body)
         masks = controller.compute_masks(
             model, x, y, loss, g_old_list=g_old_list, snapshot=snapshot,
-            memory=memory)
+            memory=memory, hmem_list=hmem_list)
         pre = {g.name: g.param.detach().clone()
                for g in controller.groups}
         optimizer.step()
@@ -125,7 +132,24 @@ def train_one_epoch_gated(
 
         if step == 0 or step == len(loader) - 1:
             stats = mask_stats(masks)
-            mask_rows.append({"phase": phase, "batch": step, **stats})
+            row = {"phase": phase, "batch": step, **stats}
+            if hmem_list is not None:
+                h_all = torch.cat([h.flatten() for h in hmem_list])
+                m_all = torch.cat([m.flatten() for m in masks])
+                dW_all = torch.cat([
+                    (g.param.detach() - pre[g.name]).abs().flatten()
+                    for g in controller.groups])
+                a, b, c = h_all, m_all, dW_all
+                a, b, c = a - a.mean(), b - b.mean(), c - c.mean()
+                row.update({
+                    "hmem_mean": float(h_all.mean()),
+                    "hmem_std": float(h_all.std()),
+                    "hmem_min": float(h_all.min()),
+                    "hmem_max": float(h_all.max()),
+                    "corr_hmem_mask": float((a * b).mean() / (a.std() * b.std() + 1e-12)),
+                    "corr_hmem_dw": float((a * c).mean() / (a.std() * c.std() + 1e-12)),
+                })
+            mask_rows.append(row)
 
         total_loss += loss.item() * x.size(0)
         preds = (torch.sigmoid(logits) >= 0.5).long()
@@ -189,11 +213,17 @@ def main() -> None:
                         choices=["ewc", "max", "recency", "ema"], default=None,
                         help="old-knowledge importance aggregation "
                              "(default: from meta config)")
+    parser.add_argument("--hmem-mode",
+                        choices=["none", "grad", "random", "shuffled",
+                                 "magnitude"], default=None,
+                        help="input-driven influence channel fed to the HRM "
+                             "(default: from config hmem.mode)")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
     if args.seed is not None:
         cfg.train.seed = args.seed
+    hmem_mode = args.hmem_mode or cfg.hmem_mode
     if args.order is not None:
         wanted = [n.strip() for n in args.order.split(",")]
         by_name = {t.name: t for t in cfg.tasks}
@@ -247,6 +277,7 @@ def main() -> None:
             hidden_dim=cfg.governor.hidden_dim,
             refine_steps=cfg.governor.refine_steps,
             init_mask=cfg.governor.init_mask,
+            per_weight_feat_dim=8 + (1 if hmem_mode != "none" else 0),
         ).to(device)
     governor.load_state_dict(torch.load(args.governor, map_location=device))
     governor.eval()  # FROZEN governance core (§132.3): no grads, no updates
@@ -266,7 +297,8 @@ def main() -> None:
           f"controlling {sum(g.size for g in groups):,} weights "
           f"({getattr(governor, 'granularity', args.mode)}-level, "
           f"{len(groups)} modules)")
-    print(f"Governor file: {args.governor}\n")
+    print(f"Governor file: {args.governor}")
+    print(f"Influence channel (h_mem): {hmem_mode}")
 
     # --- continual stream (same protocol as Phase 1) -------------------------
     accuracy_matrix = [[float("nan")] * num_tasks for _ in range(num_tasks)]
@@ -303,7 +335,8 @@ def main() -> None:
             loss, acc, secs = train_one_epoch_gated(
                 model, train_loader, optimizer, loss_fn, device,
                 controller, mask_rows, phase + 1, g_old_imm, snapshot,
-                memory=memory, close_threshold=close_threshold)
+                memory=memory, close_threshold=close_threshold,
+                hmem_mode=hmem_mode)
             log_rows.append({
                 "task": task_name, "phase": phase + 1, "epoch": epoch + 1,
                 "train_loss": round(loss, 5),
@@ -371,6 +404,7 @@ def main() -> None:
         "granularity": getattr(governor, "granularity", args.mode),
         "memory": {"agg": args.memory_agg or getattr(cfg.meta, "memory_agg", "ewc"),
                    "tasks_captured": memory.n},
+        "hmem_mode": hmem_mode,
         "training_time_seconds": {f"task{i+1}": round(t, 3) for i, t in train_times.items()},
         "total_training_seconds": round(sum(train_times.values()), 3),
         "inference_latency_ms_per_sample": latency_ms,

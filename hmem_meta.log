@@ -1,0 +1,16 @@
+=== HMEM META random ===
+  new-task acc ungated : 73.49%
+  new-task cost of protecting: -7.57%
+Training took 525s
+Saved governor to results_hmem/random_governor/governor_pretrained.pt
+=== HMEM META shuffled ===
+  new-task acc ungated : 73.49%
+  new-task cost of protecting: -7.56%
+Training took 474s
+Saved governor to results_hmem/shuffled_governor/governor_pretrained.pt
+=== HMEM META magnitude ===
+  new-task acc ungated : 73.49%
+  new-task cost of protecting: -7.89%
+Training took 509s
+Saved governor to results_hmem/magnitude_governor/governor_pretrained.pt
+=== HMEM META COMPLETE ===

@@ -141,6 +141,67 @@ def compute_global_features(
     ], device=device)
 
 
+def compute_influence(
+    g_list: list[torch.Tensor],
+    mode: str = "none",
+    seed_base: int = 0,
+    step: int = 0,
+    device: torch.device | None = None,
+) -> list[torch.Tensor] | None:
+    """INPUT-DRIVEN weight-influence probe (h_mem channel).
+
+    For the current input batch, a per-weight influence field
+
+        I_i(x) ~ how strongly parameter i influences the result.
+
+    The probe pass is the SAME backward that already happened for the
+    optimizer (gradients w.r.t. current params, no weights touched, no
+    extra forward): the cheap differentiable definition I_i = abs(dL/dW_i),
+    batch-normalized to mean 1 (I_hat = I / mean(I) + eps) for numerical
+    stability. The HRM keeps full control of all 17,249 weights; this is
+    PRIORITIZATION context, never a hard mask.
+
+    Modes (ablation set):
+      "none"      -> no influence channel (legacy governor, ablation A)
+      "grad"      -> raw I_hat (ablation B)
+      "random"    -> random map with the same mean=1 profile (control C)
+      "shuffled"  -> true influence field with weight positions
+                     permuted globally (control D)
+      "magnitude" -> only module-level mean magnitude, broadcast to every
+                     weight in the module (ablation E: magnitude only,
+                     no location information)
+
+    Deterministic for the random controls: generators seeded by
+    (seed_base, step).
+    """
+    if mode == "none":
+        return None
+    if mode == "random":
+        out = []
+        for g in g_list:
+            gen = torch.Generator(device=device).manual_seed(
+                (seed_base * 7919 + step * 131) % (2 ** 32))
+            u = torch.rand(g.numel(), generator=gen, device=device)
+            out.append(u / (u.mean() + 1e-12))
+        return out
+    I = [g.detach().abs().flatten() for g in g_list]
+    if mode == "magnitude":
+        g_all = torch.cat(I)
+        gmean = g_all.mean() + 1e-12
+        return [torch.full((v.numel(),), v.mean() / gmean, device=v.device)
+                for v in I]
+    if mode == "shuffled":
+        g_all = torch.cat(I)
+        gen = torch.Generator(device=device).manual_seed(
+            (seed_base * 7919 + step * 131) % (2 ** 32))
+        perm = torch.randperm(g_all.numel(), generator=gen, device=device)
+        return list(g_all[perm].split([v.numel() for v in I]))
+    # "grad": normalized |dL/dW|
+    g_all = torch.cat(I)
+    denom = g_all.mean() + 1e-12
+    return [v / denom for v in I]
+
+
 class HRMIntentGovernor(nn.Module):
     """Tiny intent network: parameter/gradient state -> per-weight update gates.
 
@@ -204,6 +265,7 @@ class HRMIntentGovernor(nn.Module):
         hist_list: list[torch.Tensor] | None = None,
         mem_imp_list: list[torch.Tensor] | None = None,
         mem_dir_list: list[torch.Tensor] | None = None,
+        hmem_list: list[torch.Tensor] | None = None,
     ) -> list[torch.Tensor]:
         """Return one gate tensor per group, shapes matching p_list.
 
@@ -217,10 +279,15 @@ class HRMIntentGovernor(nn.Module):
             gA_imm (immediate old-task gradient): most recent task's
                   sensitivity — kept alongside the accumulated memory
             gB magnitude, |W|, rel-change history, position
+            h_mem (input influence, when enabled): batch-normalized
+                  per-weight input-influence field log1p(I_hat) — an
+                  additional INFORMATION CHANNEL only; the HRM still
+                  controls all weights.
         g_old_list: per-weight gradient of the most recent OLD-task loss
         (immediate-task signal).
         mem_imp_list/mem_dir_list: accumulated importance + direction
         across ALL prior tasks (persistent old-knowledge representation).
+        hmem_list: per-weight input-influence field (compute_influence).
         """
         sizes = [p.numel() for p in p_list]
         G = len(sizes)
@@ -244,6 +311,10 @@ class HRMIntentGovernor(nn.Module):
             mem_dir_all = torch.zeros_like(g_all)
         else:
             mem_dir_all = torch.cat([v.detach().flatten() for v in mem_dir_list])
+        if hmem_list is None:
+            hmem_all = None
+        else:
+            hmem_all = torch.cat([v.detach().flatten() for v in hmem_list])
 
         gids = torch.repeat_interleave(torch.arange(G, device=p_all.device),
                                        torch.tensor(sizes, device=p_all.device))
@@ -269,6 +340,11 @@ class HRMIntentGovernor(nn.Module):
                 onehot,
                 ctx,
             ], dim=-1)
+            if hmem_all is not None:
+                feats = torch.cat([
+                    feats,
+                    torch.log1p(hmem_all.abs() + eps).unsqueeze(-1),
+                ], dim=-1)
         else:
             # module-level: segment-reduced stats per group (vectorized)
             counts = torch.zeros(G, device=p_all.device)
@@ -321,6 +397,7 @@ class HRMIntentGovernor(nn.Module):
         hist_list: list[torch.Tensor] | None = None,
         mem_imp_list: list[torch.Tensor] | None = None,
         mem_dir_list: list[torch.Tensor] | None = None,
+        hmem_list: list[torch.Tensor] | None = None,
     ) -> list[torch.Tensor]:
         """Gate tensors computed from a live model's params + .grad."""
         p_list = [g.param.detach().flatten() for g in groups]
@@ -329,7 +406,7 @@ class HRMIntentGovernor(nn.Module):
             x, y, loss,
             torch.cat(g_list), torch.cat(p_list), device)
         return self.gate(p_list, g_list, global_feats, g_old_list, hist_list,
-                         mem_imp_list, mem_dir_list)
+                         mem_imp_list, mem_dir_list, hmem_list)
 
     def gate_from_state(
         self,
@@ -345,6 +422,7 @@ class HRMIntentGovernor(nn.Module):
         hist_list: list[torch.Tensor] | None = None,
         mem_imp_list: list[torch.Tensor] | None = None,
         mem_dir_list: list[torch.Tensor] | None = None,
+        hmem_list: list[torch.Tensor] | None = None,
     ) -> list[torch.Tensor]:
         """Gate tensors from a functional parameter dict (meta-training path)."""
         p_list = [p_cur[g.name].detach().flatten() for g in groups]
@@ -353,10 +431,10 @@ class HRMIntentGovernor(nn.Module):
             x, y, loss, torch.cat(g_flat), torch.cat(p_list), device)
         if differentiable:
             return self.gate(p_list, g_flat, global_feats, g_old_list,
-                             hist_list, mem_imp_list, mem_dir_list)
+                             hist_list, mem_imp_list, mem_dir_list, hmem_list)
         with torch.no_grad():
             return self.gate(p_list, g_flat, global_feats, g_old_list,
-                             hist_list, mem_imp_list, mem_dir_list)
+                             hist_list, mem_imp_list, mem_dir_list, hmem_list)
 
     def total_masks(self, groups: list[ParamGroup]) -> int:
         return sum(g.size for g in groups)
@@ -409,6 +487,7 @@ class DirectGateGovernor(nn.Module):
         hist_list=None,
         mem_imp_list=None,
         mem_dir_list=None,
+        hmem_list=None,
     ) -> list[torch.Tensor]:
         """Same interface as HRMIntentGovernor; state inputs are ignored."""
         return self._masks(differentiable)
@@ -425,6 +504,7 @@ class DirectGateGovernor(nn.Module):
         hist_list=None,
         mem_imp_list=None,
         mem_dir_list=None,
+        hmem_list=None,
     ) -> list[torch.Tensor]:
         return self._masks(differentiable=False)
 
@@ -466,6 +546,7 @@ class HRMController:
         g_old_list: list[torch.Tensor] | None = None,
         snapshot: dict[str, torch.Tensor] | None = None,
         memory: SensitivityMemory | None = None,
+        hmem_list: list[torch.Tensor] | None = None,
     ) -> list[torch.Tensor]:
         """Read-only gate computation (does NOT touch .grad).
 
@@ -474,8 +555,8 @@ class HRMController:
         memory: persistent accumulated importance + direction over ALL prior
         tasks (SensitivityMemory) -> "how costly is changing this weight to
         everything learned so far?". snapshot: phase-start params ->
-        rel-change history.
-        """
+        rel-change history. hmem_list: input-driven influence field
+        (additional context channel; full weight control is retained)."""
         hist_list = None
         if snapshot is not None:
             eps = 1e-8
@@ -490,7 +571,7 @@ class HRMController:
             mem_dir = memory.direction()
         return self.governor.gate_from_model(
             model, self.groups, x, y, loss, self.device,
-            g_old_list, hist_list, mem_imp, mem_dir)
+            g_old_list, hist_list, mem_imp, mem_dir, hmem_list)
 
     @torch.no_grad()
     def scale_update(

@@ -49,8 +49,8 @@ from torch.func import functional_call
 from .config import load_config
 from .experiment import set_seed
 from .hrm import (
-    build_module_groups, DirectGateGovernor, HRMIntentGovernor, mask_stats,
-    SensitivityMemory,
+    build_module_groups, compute_influence, DirectGateGovernor,
+    HRMIntentGovernor, mask_stats, SensitivityMemory,
 )
 from .model import TinyNumericTransformer
 
@@ -147,6 +147,7 @@ def gated_burst(
     mem_dir: list[torch.Tensor] | None = None,
     optim: str = "adamw",
     close_threshold: float = 0.02,
+    hmem_mode: str = "none",
 ) -> tuple[dict[str, torch.Tensor], list[dict], float]:
     """Unroll `steps` governor-gated updates on `task`.
 
@@ -164,6 +165,11 @@ def gated_burst(
                accumulate ~0.5 total movement PER PHASE. The same mask
                therefore caused ~100x more damage live than in meta.
       "sgd":  W -= lr * M o g (legacy, kept for comparison)
+
+    hmem_mode: input-driven influence channel — per-step h_mem is derived
+    from the SAME per-step gradient (identical semantics to the live
+    stream's probe pass), so the governor is meta-trained with the exact
+    channel it will see live.
 
     Returns (final params dict, per-step mask stats, mean gate across steps).
     """
@@ -199,10 +205,14 @@ def gated_burst(
             if p0 is not None:
                 hist = [(p_cur[g.name] - p0[g.name]).abs()
                         / (p0[g.name].abs() + 1e-8) for g in groups]
+            hmem_list = compute_influence(
+                grad_list, hmem_mode, seed_base=seed_base, step=s,
+                device=device)
             masks = governor.gate_from_state(
                 p_cur, grad_list, groups, x, y, loss, device,
                 differentiable=differentiable, g_old_list=g_old,
-                hist_list=hist, mem_imp_list=mem_imp, mem_dir_list=mem_dir)
+                hist_list=hist, mem_imp_list=mem_imp, mem_dir_list=mem_dir,
+                hmem_list=hmem_list)
 
         mask_log.append(mask_stats(masks))
         gate_means.append(torch.cat([m.flatten() for m in masks]).mean())
@@ -343,7 +353,8 @@ def meta_step(
         seed_base=seed_off * 37 + 5, device=device, differentiable=True,
         g_old=g_old_imm, p0=p0, second_order=m.second_order,
         mem_imp=mem_imp, mem_dir=mem_dir, optim=optim_name,
-        close_threshold=getattr(m, "close_threshold", 0.02))
+        close_threshold=getattr(m, "close_threshold", 0.02),
+        hmem_mode=getattr(config, "hmem_mode", "none"))
 
     x_bv = _sample_batch(bsize, seed_offset=seed_off * 43 + 11).to(device)
     y_bv = meta_task_labels(x_bv, fam_b).to(device)
@@ -480,7 +491,8 @@ def meta_evaluate(
             seed_base=p * 157 + 5, device=device, differentiable=False,
             g_old=g_old_imm, p0=p0, mem_imp=mem_imp, mem_dir=mem_dir,
             optim=getattr(m, "burst_optim", "adamw"),
-            close_threshold=getattr(m, "close_threshold", 0.02))
+            close_threshold=getattr(m, "close_threshold", 0.02),
+            hmem_mode=getattr(config, "hmem_mode", "none"))
         with torch.no_grad():
             acc_a_gated = float(np.mean([
                 (functional_call(model, p_g, (xa,)) > 0).float()
@@ -549,9 +561,16 @@ def main() -> None:
                         default=None,
                         help="old-knowledge importance aggregation "
                              "(ewc=mean g^2, max=|g| max, recency-weighted, ema)")
+    parser.add_argument("--hmem-mode",
+                        choices=["none", "grad", "random", "shuffled",
+                                 "magnitude"], default=None,
+                        help="input-driven influence channel fed to the HRM "
+                             "(default: from config hmem.mode)")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
+    if args.hmem_mode is not None:
+        cfg.hmem_mode = args.hmem_mode
     if args.seed is not None:
         cfg.train.seed = args.seed
     if args.old_tasks_max is not None:
@@ -599,6 +618,7 @@ def main() -> None:
         hidden_dim=cfg.governor.hidden_dim,
         refine_steps=cfg.governor.refine_steps,
         init_mask=cfg.governor.init_mask,
+        per_weight_feat_dim=8 + (1 if cfg.hmem_mode != "none" else 0),
     ).to(device)
     if args.mode == "direct":
         governor = DirectGateGovernor(
@@ -622,7 +642,8 @@ def main() -> None:
           f"batch={m.batch_size}")
     print(f"Old-knowledge memory: depth 0..{getattr(m, 'old_tasks_max', 0)} tasks, "
           f"agg='{getattr(m, 'memory_agg', 'ewc')}' "
-          f"(I_mem = accumulated per-weight importance, g_mem = direction)\n")
+          f"(I_mem = accumulated per-weight importance, g_mem = direction)")
+    print(f"Influence channel (h_mem): {cfg.hmem_mode}\n")
     reset_model(model)
 
     gov_opt = torch.optim.AdamW(governor.parameters(), lr=m.lr)
@@ -694,6 +715,7 @@ def main() -> None:
               "lambda_delta": m.lambda_delta},
         "memory": {"old_tasks_max": int(getattr(m, "old_tasks_max", 0)),
                    "agg": getattr(m, "memory_agg", "ewc")},
+        "hmem_mode": cfg.hmem_mode,
         "training_seconds": round(time.perf_counter() - start, 1),
         "mask_stats_last": {k: round(v, 4) for k, v in log[-1].items()
                             if k.startswith(("mask", "frac"))}

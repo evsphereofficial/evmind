@@ -1,0 +1,161 @@
+=== LIVE hmem=grad seed 0 ===
+Peak RAM: 1420.8 MB
+============================================================
+Outputs written to results_hmem/live_grad_s0/
+=== LIVE hmem=grad seed 1 ===
+Peak RAM: 1420.29 MB
+============================================================
+Outputs written to results_hmem/live_grad_s1/
+=== LIVE hmem=grad seed 2 ===
+Peak RAM: 1419.44 MB
+============================================================
+Outputs written to results_hmem/live_grad_s2/
+=== LIVE hmem=grad seed 3 ===
+Peak RAM: 1420.06 MB
+============================================================
+Outputs written to results_hmem/live_grad_s3/
+=== LIVE hmem=grad seed 4 ===
+Peak RAM: 1430.21 MB
+============================================================
+Outputs written to results_hmem/live_grad_s4/
+=== LIVE hmem=grad seed 5 ===
+Peak RAM: 1419.63 MB
+============================================================
+Outputs written to results_hmem/live_grad_s5/
+=== LIVE hmem=grad seed 6 ===
+Peak RAM: 1416.21 MB
+============================================================
+Outputs written to results_hmem/live_grad_s6/
+=== LIVE hmem=grad seed 7 ===
+Peak RAM: 1415.79 MB
+============================================================
+Outputs written to results_hmem/live_grad_s7/
+=== LIVE hmem=grad seed 8 ===
+Peak RAM: 1419.93 MB
+============================================================
+Outputs written to results_hmem/live_grad_s8/
+=== LIVE hmem=grad seed 9 ===
+Peak RAM: 1419.67 MB
+============================================================
+Outputs written to results_hmem/live_grad_s9/
+=== LIVE hmem=random seed 0 ===
+Peak RAM: 1418.09 MB
+============================================================
+Outputs written to results_hmem/live_random_s0/
+=== LIVE hmem=random seed 1 ===
+Peak RAM: 1421.58 MB
+============================================================
+Outputs written to results_hmem/live_random_s1/
+=== LIVE hmem=random seed 2 ===
+Peak RAM: 1419.29 MB
+============================================================
+Outputs written to results_hmem/live_random_s2/
+=== LIVE hmem=random seed 3 ===
+Peak RAM: 1422.14 MB
+============================================================
+Outputs written to results_hmem/live_random_s3/
+=== LIVE hmem=random seed 4 ===
+Peak RAM: 1432.54 MB
+============================================================
+Outputs written to results_hmem/live_random_s4/
+=== LIVE hmem=random seed 5 ===
+Peak RAM: 1432.35 MB
+============================================================
+Outputs written to results_hmem/live_random_s5/
+=== LIVE hmem=random seed 6 ===
+Peak RAM: 1432.47 MB
+============================================================
+Outputs written to results_hmem/live_random_s6/
+=== LIVE hmem=random seed 7 ===
+Peak RAM: 1418.08 MB
+============================================================
+Outputs written to results_hmem/live_random_s7/
+=== LIVE hmem=random seed 8 ===
+Peak RAM: 1419.41 MB
+============================================================
+Outputs written to results_hmem/live_random_s8/
+=== LIVE hmem=random seed 9 ===
+Peak RAM: 1417.89 MB
+============================================================
+Outputs written to results_hmem/live_random_s9/
+=== LIVE hmem=shuffled seed 0 ===
+Peak RAM: 1438.52 MB
+============================================================
+Outputs written to results_hmem/live_shuffled_s0/
+=== LIVE hmem=shuffled seed 1 ===
+Peak RAM: 1437.31 MB
+============================================================
+Outputs written to results_hmem/live_shuffled_s1/
+=== LIVE hmem=shuffled seed 2 ===
+Peak RAM: 1451.62 MB
+============================================================
+Outputs written to results_hmem/live_shuffled_s2/
+=== LIVE hmem=shuffled seed 3 ===
+Peak RAM: 1440.94 MB
+============================================================
+Outputs written to results_hmem/live_shuffled_s3/
+=== LIVE hmem=shuffled seed 4 ===
+Peak RAM: 1451.7 MB
+============================================================
+Outputs written to results_hmem/live_shuffled_s4/
+=== LIVE hmem=shuffled seed 5 ===
+Peak RAM: 1451.27 MB
+============================================================
+Outputs written to results_hmem/live_shuffled_s5/
+=== LIVE hmem=shuffled seed 6 ===
+Peak RAM: 1438.61 MB
+============================================================
+Outputs written to results_hmem/live_shuffled_s6/
+=== LIVE hmem=shuffled seed 7 ===
+Peak RAM: 1438.52 MB
+============================================================
+Outputs written to results_hmem/live_shuffled_s7/
+=== LIVE hmem=shuffled seed 8 ===
+Peak RAM: 1438.35 MB
+============================================================
+Outputs written to results_hmem/live_shuffled_s8/
+=== LIVE hmem=shuffled seed 9 ===
+Peak RAM: 1451.53 MB
+============================================================
+Outputs written to results_hmem/live_shuffled_s9/
+=== LIVE hmem=magnitude seed 0 ===
+Peak RAM: 1420.41 MB
+============================================================
+Outputs written to results_hmem/live_magnitude_s0/
+=== LIVE hmem=magnitude seed 1 ===
+Peak RAM: 1420.62 MB
+============================================================
+Outputs written to results_hmem/live_magnitude_s1/
+=== LIVE hmem=magnitude seed 2 ===
+Peak RAM: 1419.57 MB
+============================================================
+Outputs written to results_hmem/live_magnitude_s2/
+=== LIVE hmem=magnitude seed 3 ===
+Peak RAM: 1417.32 MB
+============================================================
+Outputs written to results_hmem/live_magnitude_s3/
+=== LIVE hmem=magnitude seed 4 ===
+Peak RAM: 1417.15 MB
+============================================================
+Outputs written to results_hmem/live_magnitude_s4/
+=== LIVE hmem=magnitude seed 5 ===
+Peak RAM: 1416.18 MB
+============================================================
+Outputs written to results_hmem/live_magnitude_s5/
+=== LIVE hmem=magnitude seed 6 ===
+Peak RAM: 1417.63 MB
+============================================================
+Outputs written to results_hmem/live_magnitude_s6/
+=== LIVE hmem=magnitude seed 7 ===
+Peak RAM: 1419.54 MB
+============================================================
+Outputs written to results_hmem/live_magnitude_s7/
+=== LIVE hmem=magnitude seed 8 ===
+Peak RAM: 1415.99 MB
+============================================================
+Outputs written to results_hmem/live_magnitude_s8/
+=== LIVE hmem=magnitude seed 9 ===
+Peak RAM: 1420.96 MB
+============================================================
+Outputs written to results_hmem/live_magnitude_s9/
+=== HMEM LIVE SWEEP COMPLETE ===

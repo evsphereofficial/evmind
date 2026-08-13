@@ -1,0 +1,71 @@
+{
+  "steps": 390,
+  "meta_batch": 8,
+  "governor_params": 1801,
+  "base_params": 17249,
+  "controlled_weights": 17249,
+  "granularity": "weight",
+  "mode": "mlp",
+  "group_names": [
+    "input_proj.weight",
+    "input_proj.bias",
+    "pos_embedding.weight",
+    "encoder.layers.0.self_attn.in_proj_weight",
+    "encoder.layers.0.self_attn.in_proj_bias",
+    "encoder.layers.0.self_attn.out_proj.weight",
+    "encoder.layers.0.self_attn.out_proj.bias",
+    "encoder.layers.0.linear1.weight",
+    "encoder.layers.0.linear1.bias",
+    "encoder.layers.0.linear2.weight",
+    "encoder.layers.0.linear2.bias",
+    "encoder.layers.0.norm1.weight",
+    "encoder.layers.0.norm1.bias",
+    "encoder.layers.0.norm2.weight",
+    "encoder.layers.0.norm2.bias",
+    "encoder.layers.1.self_attn.in_proj_weight",
+    "encoder.layers.1.self_attn.in_proj_bias",
+    "encoder.layers.1.self_attn.out_proj.weight",
+    "encoder.layers.1.self_attn.out_proj.bias",
+    "encoder.layers.1.linear1.weight",
+    "encoder.layers.1.linear1.bias",
+    "encoder.layers.1.linear2.weight",
+    "encoder.layers.1.linear2.bias",
+    "encoder.layers.1.norm1.weight",
+    "encoder.layers.1.norm1.bias",
+    "encoder.layers.1.norm2.weight",
+    "encoder.layers.1.norm2.bias",
+    "head.weight",
+    "head.bias"
+  ],
+  "objective": {
+    "lambda_old": 1.0,
+    "lambda_sparse": 1.0,
+    "sparse_target": 0.3,
+    "lambda_ewc": 0.3,
+    "lambda_delta": 0.5
+  },
+  "memory": {
+    "old_tasks_max": 2,
+    "agg": "ewc"
+  },
+  "hmem_mode": "shuffled",
+  "training_seconds": 473.9,
+  "mask_stats_last": {
+    "mask_mean": 0.0194,
+    "mask_std": 0.0105,
+    "mask_min": 0.0003,
+    "mask_max": 0.3349,
+    "frac_lt_0.1": 0.9981,
+    "frac_gt_0.9": 0.0
+  },
+  "meta_eval": {
+    "pairs": 24.0,
+    "acc_a_before_mean": 0.7864,
+    "acc_a_gated_mean": 0.7836,
+    "acc_a_ungated_mean": 0.7575,
+    "acc_b_gated_mean": 0.6593,
+    "acc_b_ungated_mean": 0.7349,
+    "old_task_retention_gain": 0.0261,
+    "new_task_cost": -0.0756
+  }
+}

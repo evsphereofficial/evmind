@@ -1,0 +1,122 @@
+{
+  "run_name": "phase2_hrm",
+  "config": {
+    "run_name": "phase2_hrm",
+    "train_samples": 10000,
+    "test_samples": 2000,
+    "tasks": [
+      {
+        "name": "horizontal",
+        "type": "horizontal",
+        "params": {}
+      },
+      {
+        "name": "vertical",
+        "type": "vertical",
+        "params": {}
+      },
+      {
+        "name": "circle",
+        "type": "circle",
+        "params": {
+          "r": 0.55
+        }
+      },
+      {
+        "name": "diagonal",
+        "type": "diagonal",
+        "params": {}
+      },
+      {
+        "name": "xor_quadrant",
+        "type": "xor",
+        "params": {}
+      }
+    ],
+    "model": {
+      "input_dim": 2,
+      "seq_len": 2,
+      "embedding_dim": 32,
+      "num_layers": 2,
+      "num_heads": 2,
+      "ff_dim": 64,
+      "dropout": 0.0
+    },
+    "train": {
+      "seed": 1,
+      "learning_rate": 0.001,
+      "batch_size": 128,
+      "epochs_per_task": 5,
+      "optimizer": "adamw",
+      "weight_decay": 0.0,
+      "num_workers": 0
+    },
+    "governor": {
+      "hidden_dim": 24,
+      "refine_steps": 2,
+      "init_mask": 0.5,
+      "granularity": "weight",
+      "close_threshold": 0.02
+    },
+    "meta": {
+      "steps": 390,
+      "meta_batch": 8,
+      "batch_size": 512,
+      "warmup_batches": 12,
+      "warmup_lr": 0.002,
+      "burst_steps": 3,
+      "lr": 0.001,
+      "burst_optim": "adamw",
+      "burst_lr": 0.03,
+      "close_threshold": 0.02,
+      "lambda_old": 1.0,
+      "lambda_sparse": 1.0,
+      "sparse_target": 0.3,
+      "lambda_ewc": 0.3,
+      "lambda_delta": 0.5,
+      "second_order": false,
+      "eval_pairs": 24,
+      "old_tasks_max": 2,
+      "memory_agg": "ewc"
+    },
+    "hmem_mode": "none"
+  },
+  "device": "cuda",
+  "parameter_count": 17249,
+  "governor_params": 1801,
+  "num_groups": 29,
+  "granularity": "weight",
+  "memory": {
+    "agg": "ewc",
+    "tasks_captured": 5
+  },
+  "hmem_mode": "shuffled",
+  "training_time_seconds": {
+    "task1": 7.327,
+    "task2": 7.647,
+    "task3": 7.725,
+    "task4": 6.928,
+    "task5": 6.424
+  },
+  "total_training_seconds": 36.052,
+  "inference_latency_ms_per_sample": 0.0003758094999284367,
+  "peak_vram_mb": 37.11,
+  "peak_ram_mb": 1437.31,
+  "final_average_accuracy": 71.75,
+  "average_forgetting": 14.8,
+  "average_forgetting_overwritten": 18.5,
+  "update_fractions": {
+    "task1": 99.65795118557598,
+    "task2": 99.08980230738014,
+    "task3": 99.29271262102151,
+    "task4": 99.49562293466288,
+    "task5": 98.9622586816627
+  },
+  "mean_rel_changes": {
+    "task1": 2038.7003931676134,
+    "task2": 5.600458164169485,
+    "task3": 1.7975561121671364,
+    "task4": 0.9630514379462292,
+    "task5": 1.0309853269397442
+  }
+}
