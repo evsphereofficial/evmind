@@ -76,92 +76,120 @@ def make_regions(groups, region_size: int = 1000) -> list[Region]:
 
 
 class RairawCell(nn.Module):
-    """Tiny recursive controller: R / A / I / Controller.
+    """v3: SPLIT-NODE recursive controller — independent Att/Ret/Intent
+    nodes plus a composition controller.
 
-    Budget (h_dim=16, intent_dim=4, global 9, region ctx 7):
-        W_h: 16 x 32 + 16      = 528  (recurrence)
-        R  : 17,  A: 17          =  34  (retention / attention heads)
-        I  : 4 x 32 + 4         = 132  (intent head)
-        C  : 1 x (5+16+1+1+4)+1  =  29  (per-weight controller head)
-        total                   = 723  parameters  (< 1,000, doc section 3)
+    Each node is an independent small recurrent model with its own state
+    and its OWN objective (feature isolation enforced by separate
+    backwards in the meta loop):
 
-    ctx_t per region+step (16 dims):
-        region aggregates     7: mean|g|, mean|p|, mean|gp|, log1p(mean g^2),
-                                mean HRM mask (governor signal), mean I_mem
-                                importance, H_MEM influence feedback
-        global context        9: compute_global_features (batch/task state)
-    per-weight features f_i (5 dims):
-        log1p|g_i|, log1p|p_i|, position-in-region, log1p(I_mem_i),
-        log1p(ret_i)   <-- old-task sensitivity field (gA_hat, normalized):
-        the exact quantity the meta objective judges; gives the Retention
-        node explicit knowledge of "how dangerous is this weight"
+        att_node  <- L_learning: loss_new (+ delta)          -> opens gates
+        ret_node  <- L_degrad:   loss_old delta + EWC        -> closes gates
+        int_node  <- context:    composed loss (shapes ctrl) -> 4-dim intent
+        ctrl_node <- composition: full loss + movement + sparse
 
-    The controller head maps [f_i; R; A; I; h] -> gate in (0, 1).
+    Semantic composition (job-encoded, per weight i):
+        base_i = sigmoid(ctrl([fw_i; A; R; I]))
+        gate_i = clamp(base_i * (1 - R) + A, 0, 1)
+    Retention (R) can fully close a region, attention (A) can fully open
+    it, the controller sets the base openness. Gradient paths stay
+    separable: att/ret/int receive only their own objective's gradient.
+
+    Budget (h_dim=8 per node, intent_dim=4, ctx 16, fw 5):
+        rec_att / rec_ret / rec_int: 3 x (8x24+8)  = 600
+        att_head / ret_head: 2 x 9                  =  18
+        int_head: 8x24+4                            = 100
+        ctrl: 5+1+1+4+1                             =  12
+        total                                       = 730
     """
+    NODE_NAMES = ("att", "ret", "int", "ctrl")
 
-    def __init__(self, h_dim: int = 16, intent_dim: int = 4,
-                 ctx_dim: int = 16, fw_dim: int = 4) -> None:
+    def __init__(self, h_dim: int = 8, intent_dim: int = 4,
+                 ctx_dim: int = 16, fw_dim: int = 5) -> None:
         super().__init__()
         self.h_dim = h_dim
         self.intent_dim = intent_dim
         self.ctx_dim = ctx_dim
         self.fw_dim = fw_dim
 
-        self.rec = nn.Linear(h_dim + ctx_dim, h_dim)       # recurrence
-        self.ret_head = nn.Linear(h_dim, 1)                # R
-        self.att_head = nn.Linear(h_dim, 1)                # A
-        self.int_head = nn.Linear(h_dim + ctx_dim, intent_dim)  # I
-        self.ctrl = nn.Linear(fw_dim + h_dim + 2 + intent_dim, 1)  # C
+        self.att_node = nn.ModuleDict({
+            "rec": nn.Linear(h_dim + ctx_dim, h_dim),
+            "head": nn.Linear(h_dim, 1),
+        })
+        self.ret_node = nn.ModuleDict({
+            "rec": nn.Linear(h_dim + ctx_dim, h_dim),
+            "head": nn.Linear(h_dim, 1),
+        })
+        self.int_node = nn.ModuleDict({
+            "rec": nn.Linear(h_dim + ctx_dim, h_dim),
+            "head": nn.Linear(h_dim + ctx_dim, intent_dim),
+        })
+        self.ctrl_node = nn.ModuleDict({
+            "head": nn.Linear(fw_dim + 2 + intent_dim, 1),
+        })
 
-        # init: neutral retention/attention, slight open bias
         with torch.no_grad():
-            self.ret_head.bias.fill_(0.0)
-            self.att_head.bias.fill_(0.0)
+            for n in ("att_node", "ret_node", "int_node"):
+                self._modules[n]["rec"].bias.fill_(0.0)
+                self._modules[n]["head"].bias.fill_(0.0)
             b = math.log(0.3 / 0.7)
-            self.ctrl.bias.fill_(b)
-            self.rec.bias.fill_(0.0)
+            self.ctrl_node["head"].bias.fill_(b)
 
     @property
     def cell_params(self) -> int:
         return sum(p.numel() for p in self.parameters())
 
-    def _heads(self, h: torch.Tensor, ctx: torch.Tensor):
-        r = self.ret_head(h).sigmoid()                     # (1,)
-        a = self.att_head(h).sigmoid()                     # (1,)
-        i = self.int_head(torch.cat([h, ctx], dim=-1)).softmax(-1)  # (I,)
-        return r, a, i
+    def freeze(self, frozen: bool) -> None:
+        for p in self.parameters():
+            p.requires_grad_(not frozen)
 
-    def step(self, h: torch.Tensor, ctx: torch.Tensor,
+    def freeze_only(self, names: tuple[str, ...]) -> None:
+        """requires_grad only on the named nodes (gradient isolation)."""
+        for n in self.NODE_NAMES:
+            frozen = n not in names
+            for p in self._node_params(n):
+                p.requires_grad_(not frozen)
+
+    def _node_params(self, name: str):
+        return self._modules[f"{name}_node"].parameters()
+
+    def step(self, h: dict[str, torch.Tensor], ctx: torch.Tensor,
              fw: torch.Tensor, need_info: bool = False
-             ) -> tuple[torch.Tensor, torch.Tensor, dict]:
-        """One recursive step.
+             ) -> tuple[dict[str, torch.Tensor], torch.Tensor, dict]:
+        """One recursive step with independent per-node states.
 
-        Args:
-            h: (h_dim,) recurrent state (region's RAIRAW state).
-            ctx: (ctx_dim,) region+global context (no per-weight info).
-            fw: (n, fw_dim) per-weight features of the region.
-            need_info: compute R/A/I scalar logging (GPU->CPU syncs; only
-              the live logger needs it — the meta burst passes False).
-        Returns:
-            (h_new, gates, info) where gates: (n,), info: {R, A, I, adapter_need}.
+        h: {node: (h_dim,)} states (from RairawPool, or zeros).
+        ctx: (ctx_dim,), fw: (n, fw_dim).
+        Returns (h_new, gates, info) with gates (n,).
         """
-        h_in = torch.cat([h, ctx], dim=-1)
-        h_new = torch.tanh(self.rec(h_in))
-        r, a, i = self._heads(h_new, ctx)
-        g = self.ctrl(torch.cat([
-            fw,
-            r.expand(fw.shape[0], 1),
-            a.expand(fw.shape[0], 1),
-            i.unsqueeze(0).expand(fw.shape[0], -1),
-            h_new.unsqueeze(0).expand(fw.shape[0], -1),
-        ], dim=-1)).sigmoid().squeeze(-1)
+        h_new = {}
+        rec_in = {}
+        for name in ("att", "ret", "int"):
+            rec = self._modules[f"{name}_node"]["rec"]
+            head = self._modules[f"{name}_node"]["head"]
+            h_in = torch.cat([h[name], ctx], dim=-1)
+            hn = torch.tanh(rec(h_in))
+            h_new[name] = hn
+            rec_in[name] = hn
+            if name == "int":
+                int_out = head(torch.cat([hn, ctx], dim=-1)).softmax(-1)
+        a = self._modules["att_node"]["head"](rec_in["att"]).sigmoid()
+        r = self._modules["ret_node"]["head"](rec_in["ret"]).sigmoid()
+        i = int_out
+        za = torch.cat([fw,
+                        a.expand(fw.shape[0], 1),
+                        r.expand(fw.shape[0], 1),
+                        i.unsqueeze(0).expand(fw.shape[0], -1)], dim=-1)
+        base = self.ctrl_node["head"](za).sigmoid().squeeze(-1)  # (n,)
+        gates = torch.clamp(base * (1 - r.squeeze(-1)) + a.squeeze(-1),
+                            0.0, 1.0)
         if not need_info:
-            return h_new, g, {}
-        # adapter need: high attention on a highly-retained region
+            return h_new, gates, {}
         adapter_need = float((a * r).clamp(0, 1).item())
-        return h_new, g, {"R": float(r.item()), "A": float(a.item()),
-                          "I": i.detach().cpu().tolist(),
-                          "adapter_need": adapter_need}
+        return h_new, gates, {
+            "A": float(a.item()), "R": float(r.item()),
+            "I": i.detach().cpu().tolist(),
+            "adapter_need": adapter_need}
 
 
 def region_context(
@@ -234,7 +262,8 @@ class RairawPool(nn.Module):
 
     The cell parameters are SHARED across the pool (§6 pool; the doc's pool
     of available RAIRAW models); each active region instance carries its own
-    recurrent state h so per-region behavior differentiates over the stream.
+    recurrent states — one per NODE (att/ret/int) — so per-region behavior
+    differentiates over the stream.
     """
 
     def __init__(self, cell: RairawCell, max_rairaw: int = 20,
@@ -243,13 +272,15 @@ class RairawPool(nn.Module):
         self.cell = cell
         self.max_rairaw = max_rairaw
         self.total_weights = total_weights
-        self._states: list[torch.Tensor] = [None] * max_rairaw
+        self._states: list[dict[str, torch.Tensor]] = [None] * max_rairaw
         self._slot_map: dict[int, int] = {}   # region_id -> pool slot
         self.active: set[int] = set()
 
     def reset_states(self, device: torch.device) -> None:
-        self._states = [torch.zeros(self.cell.h_dim, device=device)
-                        for _ in range(self.max_rairaw)]
+        self._states = [
+            {name: torch.zeros(self.cell.h_dim, device=device)
+             for name in ("att", "ret", "int")}
+            for _ in range(self.max_rairaw)]
         self._slot_map = {}
         self.active = set()
 
@@ -259,7 +290,8 @@ class RairawPool(nn.Module):
         self.active = set(region_ids)
         self._slot_map = {rid: slot for slot, rid in enumerate(sorted(region_ids))}
         for slot in self._slot_map.values():
-            self._states[slot].zero_()
+            for s in self._states[slot].values():
+                s.zero_()
 
     def gate_region(
         self,
@@ -358,6 +390,7 @@ def allocate_rairaws(
     close_threshold: float = 0.02,
     blend: float = 0.7,
     sparse_target: float = 0.3,
+    frac_open_override: float | None = None,
 ) -> tuple[list[int], torch.Tensor]:
     """HRM WHERE decision: which regions get a RAIRAW this phase.
 
@@ -367,6 +400,7 @@ def allocate_rairaws(
         k = round(n_regions * frac_open / sparse_target)
     so that only a bounded fraction of the 17K pool is under RAIRAW
     authority; the rest are closed nodes (remain available later).
+    frac_open_override: externally EMA'd open fraction (stable K).
 
     Returns (active region ids, blended importance).
     """
@@ -376,7 +410,8 @@ def allocate_rairaws(
         blended = (blend * region_imp
                    + (1 - blend) * hmem.prior())
     m_all = torch.cat([m.detach().flatten() for m in masks])
-    frac_open = float((m_all > close_threshold).float().mean())
+    frac_open = (float((m_all > close_threshold).float().mean())
+                 if frac_open_override is None else frac_open_override)
     k = int(round(n_regions * frac_open / max(sparse_target, 1e-3)))
     k = max(1, min(k, max_rairaw, n_regions))
     top = torch.argsort(blended, descending=True)[:k]

@@ -94,6 +94,9 @@ meta:
                     # the retention signal; EWC only sharpens it.
   lambda_delta: 5.0  # burst-movement penalty (no phase_scale: the live
                      # extrapolation collapsed the gates to ~0)
+  lambda_after: 0.3  # att-node: absolute after-loss weight — makes
+                     # "do nothing" (closed gates) cost real loss, so the
+                     # attention node cannot collapse to catatonia
   eval_pairs: 24
   old_tasks_max: 2
   memory_agg: ewc

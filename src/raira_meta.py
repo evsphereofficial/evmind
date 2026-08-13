@@ -93,6 +93,9 @@ def raira_burst(
     close_threshold: float = 0.02,
     hmem_influence: float = 0.0,
     ungated: bool = False,
+    meta_mode: bool = False,
+    alloc_imp: torch.Tensor | None = None,
+    alloc_frac_open: float | None = None,
 ) -> tuple[dict[str, torch.Tensor], dict]:
     """Unroll `steps` RAIRAW-gated updates on `task`.
 
@@ -101,6 +104,12 @@ def raira_burst(
     (WHERE). The recursive cell then emits per-weight gates for active
     regions every step (HOW); inactive regions are closed nodes (gate 0,
     no Adam moments), mirroring the live stream's enforcement.
+
+    meta_mode: skip the close_threshold zeroing — inside the meta unroll a
+      zeroed gate creates a dead zone with NO gradient (the cell can never
+      learn to reopen it); the threshold is a live-stream semantic only.
+    alloc_imp / alloc_frac_open: externally EMA'd WHERE (stable stage for
+      the cell; the raw governor allocation oscillates between meta steps).
 
     offs: module name -> offset into the global concatenated flat tensor.
 
@@ -133,10 +142,19 @@ def raira_burst(
             hmem_list=compute_influence(g_probe, "magnitude", device=device))
         hrm_flat = torch.cat([m.detach().flatten() for m in hrm_masks])
         imp = region_importance(hrm_masks, groups, regions, device)
+        m_all = torch.cat([m.detach().flatten() for m in hrm_masks])
+        frac_open = float((m_all > close_threshold).float().mean())
         hmem = HmemMemory(len(regions), alpha=0.0, device=device)
+        if alloc_imp is not None:
+            imp_use = alloc_imp
+            frac_use = alloc_frac_open
+        else:
+            imp_use = imp
+            frac_use = frac_open
         active, blended = allocate_rairaws(
-            imp, hrm_masks, hmem, len(regions), pool.max_rairaw,
-            close_threshold=close_threshold)
+            imp_use, hrm_masks, hmem, len(regions), pool.max_rairaw,
+            close_threshold=close_threshold,
+            frac_open_override=frac_use)
         pool.activate(active)
         active_set = set(active)
 
@@ -208,7 +226,7 @@ def raira_burst(
                 ewc_costs.append((m_act * gA_act ** 2).mean())
 
         for i, (group, m, g) in enumerate(zip(groups, masks, grad_list)):
-            if close_threshold > 0.0:
+            if close_threshold > 0.0 and not meta_mode:
                 m = torch.where(m < close_threshold, torch.zeros_like(m), m)
             mf = m.reshape(g.shape)
             closed = mf == 0.0
@@ -235,6 +253,9 @@ def raira_burst(
         "frac_active": (len(active) / len(regions)) if not ungated else 1.0,
         "mask_log": mask_log,
     }
+    if not ungated:
+        diag["imp"] = imp.detach().clone()
+        diag["frac_open"] = frac_open
     return p_cur, diag
 
 
@@ -249,6 +270,8 @@ def raira_meta_step(
     device: torch.device,
     seed_off: int,
     rng: torch.Generator,
+    alloc_imp: torch.Tensor | None = None,
+    alloc_frac_open: float | None = None,
 ) -> dict:
     """One meta step: task sequence -> memory -> RAIRAW burst on B."""
     m = config.meta
@@ -314,7 +337,8 @@ def raira_meta_step(
         seed_base=seed_off * 37 + 5, device=device, differentiable=True,
         mem_imp=mem_imp, mem_dir=mem_dir, offs=offs,
         close_threshold=getattr(m, "close_threshold", 0.02),
-        hmem_influence=hmem_influence)
+        hmem_influence=hmem_influence, meta_mode=True,
+        alloc_imp=alloc_imp, alloc_frac_open=alloc_frac_open)
 
     x_bv = _sample_batch(bsize, seed_offset=seed_off * 43 + 11).to(device)
     y_bv = meta_task_labels(x_bv, fam_b).to(device)
@@ -354,16 +378,35 @@ def raira_meta_step(
     ewc_cost = diag["mean_ewc"] if diag["mean_ewc"] is not None \
         else torch.zeros((), device=device)
 
-    gov_loss = (
-        loss_new
-        + m.lambda_old * loss_old
-        + m.lambda_sparse * sparse_cost
-        + getattr(m, "lambda_ewc", 0.0) * ewc_cost
-        + m.lambda_delta * delta_cost
-    )
+    # ---- v3 node-isolated objectives ----
+    # Each node's parameters receive gradient ONLY from its own objective
+    # (the composition controller mediates; see RairawCell docstring).
+    # The absolute after-loss (lambda_after) is what makes "do nothing"
+    # unattractive: closed gates leave after ~ before ~ 0.7, which still
+    # costs the attention node. Pure deltas have "do nothing" as a
+    # zero-gradient fixed point and the cell collapses to catatonia.
+    lambda_after = float(getattr(m, "lambda_after", 0.3))
+    lambda_old = float(getattr(m, "lambda_old", 1.0))
+    lambda_sparse = float(getattr(m, "lambda_sparse", 1.0))
+    lambda_ewc = float(getattr(m, "lambda_ewc", 0.02))
+    lambda_delta = float(getattr(m, "lambda_delta", 5.0))
+
+    loss_att = loss_new + lambda_after * loss_new_after
+    loss_ret = lambda_old * loss_old + lambda_ewc * ewc_cost
+    loss_int = loss_att + loss_ret + lambda_sparse * sparse_cost
+    loss_ctrl = (loss_new
+                 + lambda_old * loss_old
+                 + lambda_sparse * sparse_cost
+                 + lambda_ewc * ewc_cost
+                 + lambda_delta * delta_cost)
+    gov_loss = loss_ctrl
     model.zero_grad(set_to_none=True)
     return {
         "gov_loss": gov_loss,
+        "loss_att": loss_att,
+        "loss_ret": loss_ret,
+        "loss_int": loss_int,
+        "loss_ctrl": loss_ctrl,
         "loss_new": loss_new,
         "loss_old": loss_old,
         "sparse_cost": sparse_cost,
@@ -374,6 +417,8 @@ def raira_meta_step(
         "mask_stats": diag["mask_log"][-1],
         "allocated_weights": diag["allocated_weights"],
         "frac_active": diag["frac_active"],
+        "imp": diag.get("imp"),
+        "frac_open": diag.get("frac_open"),
         "loss_new_before": diag["loss_new_before"],
         "loss_new_after": diag["loss_new_after"],
         "loss_old_before": diag["loss_old_before"],
@@ -394,15 +439,15 @@ def distill_cell(
     lr: float = 1e-2,
     seed: int = 999,
 ) -> None:
-    """Node-level pretraining: teach the shared cell to reproduce the frozen
-    governor's per-weight gates region by region.
+    """Init the cell at the sparse target: teach it uniform ~0.3 gates.
 
-    The governor is the competent per-weight policy; the cell must learn the
-    feature->gate mapping (|g|, |p|, pos, I_mem + region/global context) on
-    its own. Distilling each region's behavior gives every node a competent
-    initialization; the meta loop then refines the recursion for the live
-    horizon."""
+    The frozen governor's masks collapsed to near zero (mask_mean ~0.02)
+    during its own meta-training, so distilling to them initializes the
+    cell at catatonia (v2 did exactly that: mask_mean 0.004 at step 1).
+    The meta phase is responsible for shaping; distillation only gives a
+    neutral, open-at-target start (base=0.3, R=0, A=0)."""
     m = config.meta
+    target = float(getattr(m, "sparse_target", 0.3))
     rng = torch.Generator().manual_seed(seed)
     opt = torch.optim.AdamW(pool.cell.parameters(), lr=lr)
     bsize = m.batch_size
@@ -437,9 +482,8 @@ def distill_cell(
                 r, g_flat, p_flat, hrm_flat, None, None,
                 float(torch.rand(1, generator=rng)[0]), gfeats,
                 alloc_frac=len(pool.active) / len(regions), need_info=False)
-            base = offs[r.group_name]
-            target = hrm_flat[base + r.start: base + r.stop]
-            total = total + F.mse_loss(gates_r, target)
+            total = total + F.mse_loss(
+                gates_r, torch.full_like(gates_r, target))
         total = total / len(pool.active)
         total.backward()
         opt.step()
@@ -538,17 +582,16 @@ def main() -> None:
           f"(budget < 1000), pool max {cfg.raira.max_rairaw}")
     print(f"HRM governor (frozen, allocation only): "
           f"{governor_hrm.governor_params():,} params from {args.governor}")
-    print(f"Objective: L_new + {m.lambda_old}*L_old "
-          f"+ {m.lambda_sparse}*(mean(M)-{getattr(m, 'sparse_target', 0.3)})^2 "
-          f"+ {getattr(m, 'lambda_ewc', 0.0)}*mean(M*(gA_hat^2-1)) "
-          f"+ {m.lambda_delta}*mean(|dW|/|W|)")
+    print(f"Objective (v3 nodes): att <- L_new+{getattr(m, 'lambda_after', 0.3)}*after; "
+          f"ret <- {m.lambda_old}*L_old+{getattr(m, 'lambda_ewc', 0.02)}*EWC; "
+          f"int <- composed; ctrl <- composed+{m.lambda_sparse}*sparse"
+          f"+{m.lambda_delta}*dW")
     print(f"Meta: {m.meta_batch} parallel steps x {m.steps} updates, "
           f"warmup={m.warmup_batches}, burst={m.burst_steps}x, batch={m.batch_size}")
     print(f"H_MEM: empty per meta step; random influence context "
           f"(alpha={cfg.raira.hmem_alpha} live)")
     reset_model(model)
 
-    gov_opt = torch.optim.AdamW(cell.parameters(), lr=m.lr)
     rng = torch.Generator().manual_seed(7_777 + cfg.train.seed)
     start = time.perf_counter()
 
@@ -563,6 +606,14 @@ def main() -> None:
     log: list[dict] = []
     ema = {"L_new": 0.0, "L_old": 0.0, "sparse": 0.0, "ewc": 0.0, "delta": 0.0}
 
+    # v3: one optimizer per node — each node steps ONLY on its own loss.
+    node_opts = {
+        "att": torch.optim.AdamW(cell.att_node.parameters(), lr=m.lr),
+        "ret": torch.optim.AdamW(cell.ret_node.parameters(), lr=m.lr),
+        "int": torch.optim.AdamW(cell.int_node.parameters(), lr=m.lr),
+        "ctrl": torch.optim.AdamW(cell.ctrl_node.parameters(), lr=m.lr),
+    }
+
     print("Pre-warm kernels (first-batch cudnn/optimizer penalty) ...")
     xw = _sample_batch(m.batch_size, seed_offset=99_999).to(device)
     warmup_opt = torch.optim.AdamW(model.parameters(), lr=m.warmup_lr)
@@ -573,18 +624,47 @@ def main() -> None:
     reset_model(model)
     torch.cuda.synchronize()
 
+    # WHERE EMA: the raw governor allocation (fresh random model per meta
+    # step) oscillates wildly (alloc 2705 -> 33 -> 1 -> 2705 in v2), making
+    # the meta objective noise. The cell gets a slowly-drifting stage.
+    ema_imp: torch.Tensor | None = None
+    ema_frac: float | None = None
+
     for step in range(1, m.steps + 1):
         outs = []
         for k in range(m.meta_batch):
             seed_off = (step - 1) * m.meta_batch + k
             outs.append(raira_meta_step(model, pool, governor_hrm, groups,
                                         regions, offs, cfg, device, seed_off,
-                                        rng))
+                                        rng, alloc_imp=ema_imp,
+                                        alloc_frac_open=ema_frac))
 
-        total_loss = sum(o["gov_loss"] for o in outs) / len(outs)
-        gov_opt.zero_grad(set_to_none=True)
-        total_loss.backward()
-        gov_opt.step()
+        # ---- node-isolated backward (see RairawCell docstring) ----
+        # All backwards run BEFORE any optimizer step: stepping mutates the
+        # cell params in place, which would invalidate the retained graphs.
+        mean_ctrl = sum(o["loss_ctrl"] for o in outs) / len(outs)
+        mean_att = sum(o["loss_att"] for o in outs) / len(outs)
+        mean_ret = sum(o["loss_ret"] for o in outs) / len(outs)
+        mean_int = sum(o["loss_int"] for o in outs) / len(outs)
+        for name, loss in (("ctrl", mean_ctrl), ("int", mean_int),
+                           ("att", mean_att), ("ret", mean_ret)):
+            if loss.grad_fn is None:
+                continue  # e.g. no old tasks: ret has nothing to protect
+            cell.freeze_only((name,))
+            node_opts[name].zero_grad(set_to_none=True)
+            loss.backward(retain_graph=True)
+        cell.freeze_only(cell.NODE_NAMES)
+        for opt in node_opts.values():
+            opt.step()
+
+        # WHERE EMA update (from the last sub-step's governor probe)
+        o = outs[-1]
+        if o["imp"] is not None:
+            imp_k = 0.05
+            ema_imp = (o["imp"] if ema_imp is None
+                       else (1 - imp_k) * ema_imp + imp_k * o["imp"])
+            ema_frac = (o["frac_open"] if ema_frac is None
+                        else 0.95 * ema_frac + 0.05 * o["frac_open"])
 
         o = outs[-1]
         vals = (o["loss_new"], o["loss_old"], o["sparse_cost"],
@@ -596,7 +676,10 @@ def main() -> None:
             stats = o["mask_stats"]
             log.append({
                 "step": step,
-                "gov_loss": float(total_loss.detach()),
+                "gov_loss": float(mean_ctrl.detach()),
+                "loss_att": float(mean_att.detach()),
+                "loss_ret": float(mean_ret.detach()),
+                "loss_int": float(mean_int.detach()),
                 "loss_new": float(o["loss_new"].detach()),
                 "loss_new_before": round(o["loss_new_before"], 4),
                 "loss_new_after": round(o["loss_new_after"], 4),
@@ -642,7 +725,8 @@ def main() -> None:
                       "lambda_sparse": m.lambda_sparse,
                       "sparse_target": m.sparse_target,
                       "lambda_ewc": getattr(m, "lambda_ewc", 0.0),
-                      "lambda_delta": m.lambda_delta},
+                      "lambda_delta": m.lambda_delta,
+                      "lambda_after": getattr(m, "lambda_after", 0.3)},
         "memory": {"old_tasks_max": int(getattr(m, "old_tasks_max", 0)),
                    "agg": getattr(m, "memory_agg", "ewc")},
         "training_seconds": round(time.perf_counter() - start, 1),

@@ -1,0 +1,6 @@
+task,phase,hmem_n_tasks,influence_mean,influence_max_region,influence_max
+horizontal,1,1,0.5393,2,3.5168
+vertical,2,2,0.5576,2,4.3428
+circle,3,3,0.5525,2,4.1131
+diagonal,4,4,1.4387,2,5.6857
+xor_quadrant,5,5,1.3942,7,4.6508

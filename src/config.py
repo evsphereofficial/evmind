@@ -97,6 +97,7 @@ class MetaConfig:
                                 # conflict magnitude, free-capacity ratio)
                                 # + short-horizon unroll, not EWC pressure
     lambda_delta: float = 0.5   # weight of mean relative |dW| (change cost)
+    lambda_after: float = 0.3   # att-node: absolute after-loss weight
     distill_steps: int = 0      # node-level pretraining: regress the cell's
                                 # region gates onto the frozen governor's
                                 # per-weight masks (teacher distillation)

@@ -1,0 +1,30 @@
+Device: cuda
+============================================================
+RAIRAW-V1 META-TRAINING (recursive controller)
+============================================================
+Base model params: 17,249  main weight pool: 17,249  regions: 45 (<= 1000 weights each)
+RAIRAW cell params: 1,866  (budget < 1000), pool max 20
+HRM governor (frozen, allocation only): 0 params from /home/evsphere/projects/aiprojects/evmind/results_hmem/magnitude_governor/governor_pretrained.pt
+Objective (v3 nodes): att <- L_new+0.3*after; ret <- 1.0*L_old+0.02*EWC; int <- composed; ctrl <- composed+1.0*sparse+5.0*dW
+Meta: 4 parallel steps x 200 updates, warmup=8, burst=20x, batch=512
+H_MEM: empty per meta step; random influence context (alpha=0.5 live)
+Distill: 120 region-gate steps (teacher: frozen HRM)
+distill    1/120  cellMSE=0.1138
+distill   30/120  cellMSE=0.0010
+distill   60/120  cellMSE=0.0002
+distill   90/120  cellMSE=0.0001
+distill  120/120  cellMSE=0.0001
+Pre-warm kernels (first-batch cudnn/optimizer penalty) ...
+step     1/200  L_new=-0.0007 (b 0.73->a 0.69) L_old=0.0000  sp=0.0000 ewc=0.0000 dW=0.00024  | alloc 3673/17249 w (44% regions) | mask mean=0.070 <0.1:0.79
+step    50/200  L_new=-0.0702 (b 0.71->a 0.58) L_old=0.0186  sp=0.0104 ewc=0.3217 dW=0.01126  | alloc 5577/17249 w (44% regions) | mask mean=0.156 <0.1:0.68
+step   100/200  L_new=-0.1039 (b 0.71->a 0.66) L_old=0.0339  sp=0.0549 ewc=0.7273 dW=0.01826  | alloc 4609/17249 w (44% regions) | mask mean=0.178 <0.1:0.73
+step   150/200  L_new=-0.1231 (b 0.81->a 0.57) L_old=0.0384  sp=0.1448 ewc=0.9492 dW=0.02350  | alloc 4609/17249 w (44% regions) | mask mean=0.214 <0.1:0.73
+step   200/200  L_new=-0.1607 (b 0.62->a 0.35) L_old=0.0530  sp=0.2492 ewc=1.0375 dW=0.02952  | alloc 3641/17249 w (44% regions) | mask mean=0.189 <0.1:0.79
+
+============================================================
+RAIRAW META-TRAINING COMPLETE
+============================================================
+Cell params: 1,866 controlling 17,249 weights via 45 regions (pool max 20)
+Last allocation: 3641/17249 weights active (44% regions)
+Training took 2100s
+Saved cell to results_raira_v3/raira_cell_pretrained.pt

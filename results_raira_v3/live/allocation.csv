@@ -1,0 +1,6 @@
+task,phase,active_rairaws,allocated_weights,pct_of_pool,probe_loss,mean_importance
+horizontal,1,20,3673,21.29,0.7667,0.0247
+vertical,2,1,64,0.37,2.8033,0.0598
+circle,3,1,64,0.37,1.7986,0.0531
+diagonal,4,20,3673,21.29,0.4878,0.0585
+xor_quadrant,5,1,64,0.37,5.0993,0.0888
