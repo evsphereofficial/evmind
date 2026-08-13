@@ -108,6 +108,26 @@ class MetaConfig:
 
 
 @dataclass
+class RairawConfig:
+    """RAIRAW-V1 (Experiment Series 2) settings.
+
+    RAIRAW-V1 transforms the adaptive unit from an undifferentiated scalar
+    weight into a small recursive model (R / A / I / Controller) holding
+    local authority over a bounded region of main-model weights. The HRM
+    governor keeps global authority (allocation); H_MEM records RAIRAW
+    influence feedback for future allocation.
+    """
+    region_size: int = 1000      # max main weights per RAIRAW region (Exp 2.2)
+    max_rairaw: int = 20         # bounded RAIRAW pool (Exp 2.3)
+    h_dim: int = 16              # controller recurrent state dim (Exp 2.1)
+    intent_dim: int = 4          # intent vocabulary: retain/learn/adapt/protect
+    hmem_alpha: float = 0.5      # H_MEM influence EMA rate
+    alloc_blend: float = 0.7     # HRM mask vs H_MEM prior in allocation
+    sparse_target: float = 0.3   # allocation target: fraction of open mass
+    close_threshold: float = 0.02  # gates below this = closed nodes
+
+
+@dataclass
 class ExperimentConfig:
     """Top-level experiment configuration."""
     run_name: str = "baseline"
@@ -120,6 +140,7 @@ class ExperimentConfig:
     meta: MetaConfig = field(default_factory=MetaConfig)
     hmem_mode: str = "none"  # input-driven weight-influence channel:
                              # none | grad | random | shuffled | magnitude
+    raira: RairawConfig = field(default_factory=RairawConfig)
 
     @property
     def num_tasks(self) -> int:
@@ -159,6 +180,7 @@ def load_config(path: str) -> ExperimentConfig:
     train = TrainConfig(**raw.get("train", {}))
     governor = GovernorConfig(**raw.get("governor", {}))
     meta = MetaConfig(**raw.get("meta", {}))
+    raira = RairawConfig(**raw.get("raira", {}))
 
     return ExperimentConfig(
         run_name=str(raw.get("run_name", "baseline")),
@@ -169,5 +191,6 @@ def load_config(path: str) -> ExperimentConfig:
         train=train,
         governor=governor,
         meta=meta,
+        raira=raira,
         hmem_mode=str(raw.get("hmem", {}).get("mode", "none")),
     )
