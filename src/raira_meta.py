@@ -430,6 +430,7 @@ def main() -> None:
                         help="override the experiment seed")
     parser.add_argument("--steps", type=int, default=None)
     parser.add_argument("--sparse-target", type=float, default=None)
+    parser.add_argument("--lambda-ewc", type=float, default=None)
     parser.add_argument("--old-tasks-max", type=int, default=None)
     args = parser.parse_args()
 
@@ -440,6 +441,8 @@ def main() -> None:
         cfg.meta.old_tasks_max = args.old_tasks_max
     if args.sparse_target is not None:
         cfg.meta.sparse_target = args.sparse_target
+    if args.lambda_ewc is not None:
+        cfg.meta.lambda_ewc = args.lambda_ewc
     if args.steps is not None:
         cfg.meta.steps = args.steps
     outdir = Path(args.outdir)
