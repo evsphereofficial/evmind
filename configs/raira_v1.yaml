@@ -1,0 +1,97 @@
+# EvMind RAIRAW-V1 — Experiment Series 2 (RAIRAW_V1_Architecture_Series_2.md).
+# Same base model + task protocol as Phase 2 (baseline2.yaml), plus the
+# RAIRAW hierarchy:
+#   HRM governor (frozen, pretrained) -> WHERE: allocates regions of the
+#     17,249-weight main pool to a bounded RAIRAW pool (top-K by governor
+#     mask importance, blended with H_MEM influence after task 1)
+#   RAIRAW recursive cells (meta-trained, frozen) -> HOW: per-weight gates
+#     from R/A/I/Controller recurrence within each allocated region
+#   H_MEM -> observed per-region influence memory (empty at start)
+# Meta-train first (src/raira_meta.py), then run (src/experiment3.py).
+
+run_name: raira_v1
+
+# Input-driven influence channel for the frozen HRM governor's allocation
+# probe (magnitude = the best-performing h_mem variant of Series 1).
+hmem:
+  mode: none    # legacy live gate channel; RAIRAW V1 replaces live gating
+                # with allocation. The allocation probe always uses the
+                # governor's own trained channel (magnitude in code).
+
+train_samples: 10000
+test_samples: 2000
+
+tasks:
+  - name: horizontal
+    type: horizontal
+  - name: vertical
+    type: vertical
+  - name: circle
+    type: circle
+    params:
+      r: 0.55
+  - name: diagonal
+    type: diagonal
+  - name: xor_quadrant
+    type: xor
+
+model:
+  input_dim: 2
+  seq_len: 2
+  embedding_dim: 32
+  num_layers: 2
+  num_heads: 2
+  ff_dim: 64
+  dropout: 0.0
+
+train:
+  seed: 0
+  learning_rate: 0.001
+  batch_size: 128
+  epochs_per_task: 5
+  optimizer: adamw
+  weight_decay: 0.0
+  num_workers: 0
+
+governor:
+  hidden_dim: 24
+  refine_steps: 2
+  init_mask: 0.5
+  granularity: weight
+  close_threshold: 0.02
+
+# RAIRAW-V1 specifics (Experiment Series 2).
+raira:
+  region_size: 1000    # max main weights per RAIRAW region (Exp 2.2)
+  max_rairaw: 20       # bounded RAIRAW pool (Exp 2.3)
+  h_dim: 16            # controller recurrent state dim (Exp 2.1)
+  intent_dim: 4        # {retain, learn, adapt, protect}
+  hmem_alpha: 0.5      # H_MEM influence EMA rate
+  alloc_blend: 0.7     # HRM mask vs H_MEM prior weight in allocation
+  sparse_target: 0.3   # allocation target: fraction of open mask mass
+  close_threshold: 0.02  # gates below this = closed nodes (as HRM system)
+
+meta:
+  steps: 390          # same update count as the HRM governor meta-training
+  meta_batch: 4
+  batch_size: 512
+  warmup_batches: 12
+  warmup_lr: 0.002
+  burst_steps: 40     # horizon-matched: ~1/10 of the live phase (395 steps),
+                      # so L_new/L_old measure real learning in the burst
+  distill_steps: 120  # node-level pretraining from the frozen governor
+  distill_lr: 0.01
+  lr: 0.001
+  burst_optim: adamw
+  burst_lr: 0.03
+  close_threshold: 0.02
+  lambda_old: 1.0
+  lambda_sparse: 1.0
+  sparse_target: 0.3  # applies to ACTIVE weights (allocated regions only;
+                      # the closed mass is ~95% of the pool)
+  lambda_ewc: 0.3
+  lambda_delta: 5.0  # burst-movement penalty (no phase_scale: the live
+                     # extrapolation collapsed the gates to ~0)
+  eval_pairs: 24
+  old_tasks_max: 2
+  memory_agg: ewc

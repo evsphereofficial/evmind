@@ -164,8 +164,14 @@ def region_context(
     hmem_influence: float,
     global_feats: torch.Tensor,
     region: Region,
+    alloc_frac: float,
+    region_frac: float,
 ) -> torch.Tensor:
-    """7 region aggregates + 9 global features -> (16,) context tensor."""
+    """7 region aggregates + alloc context + 9 global features -> (18,) ctx.
+
+    alloc_frac: active RAIRAW count / region count (how much capacity the
+      HRM gave the system this phase — lets the cell rescale its gates).
+    region_frac: region weight share of the main pool (normalized size)."""
     w = region.weight_slice
     g_r, p_r = g_flat[w], p_flat[w]
     eps = 1e-12
@@ -178,6 +184,8 @@ def region_context(
         mem_imp[w].mean() if mem_imp is not None
         else torch.tensor(0.0, device=g_r.device),
         torch.tensor(hmem_influence, device=g_r.device),   # H_MEM feedback
+        torch.tensor(alloc_frac, device=g_r.device),
+        torch.tensor(max(region_frac, eps), device=g_r.device),
     ]
     return torch.cat([torch.stack(feats), global_feats])
 
@@ -214,10 +222,12 @@ class RairawPool(nn.Module):
     recurrent state h so per-region behavior differentiates over the stream.
     """
 
-    def __init__(self, cell: RairawCell, max_rairaw: int = 20) -> None:
+    def __init__(self, cell: RairawCell, max_rairaw: int = 20,
+                 total_weights: int = 17249) -> None:
         super().__init__()
         self.cell = cell
         self.max_rairaw = max_rairaw
+        self.total_weights = total_weights
         self._states: list[torch.Tensor] = [None] * max_rairaw
         self._slot_map: dict[int, int] = {}   # region_id -> pool slot
         self.active: set[int] = set()
@@ -236,7 +246,6 @@ class RairawPool(nn.Module):
         for slot in self._slot_map.values():
             self._states[slot].zero_()
 
-    @torch.no_grad()
     def gate_region(
         self,
         region: Region,
@@ -246,11 +255,17 @@ class RairawPool(nn.Module):
         mem_imp: torch.Tensor | None,
         hmem_influence: float,
         global_feats: torch.Tensor,
+        alloc_frac: float,
     ) -> tuple[torch.Tensor, dict]:
-        """One recursive step for one active region; returns (gates, info)."""
+        """One recursive step for one active region; returns (gates, info).
+
+        Differentiable: gradient flows to the shared cell through the gates
+        and through the recurrence (h_{t-1} -> h_t). Callers that must not
+        propagate (live stream) wrap the whole call in torch.no_grad()."""
         slot = self._slot_map[region.region_id]
         ctx = region_context(g_flat, p_flat, hrm_mask_flat, mem_imp,
-                             hmem_influence, global_feats, region)
+                             hmem_influence, global_feats, region,
+                             alloc_frac, region.size / self.total_weights)
         fw = per_weight_features(g_flat, p_flat, mem_imp, region)
         h_new, gates, info = self.cell.step(self._states[slot], ctx, fw)
         self._states[slot] = h_new

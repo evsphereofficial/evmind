@@ -97,6 +97,10 @@ class MetaConfig:
                                 # conflict magnitude, free-capacity ratio)
                                 # + short-horizon unroll, not EWC pressure
     lambda_delta: float = 0.5   # weight of mean relative |dW| (change cost)
+    distill_steps: int = 0      # node-level pretraining: regress the cell's
+                                # region gates onto the frozen governor's
+                                # per-weight masks (teacher distillation)
+    distill_lr: float = 1e-2    # distillation optimizer learning rate
     second_order: bool = False  # short-horizon FOMAML is valid & stable here
     eval_pairs: int = 24        # paired gated-vs-ungated sanity check pairs
     old_tasks_max: int = 2      # persistent old-knowledge memory depth:
