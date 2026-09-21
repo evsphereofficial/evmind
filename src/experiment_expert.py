@@ -57,7 +57,7 @@ def main():
     datasets={}
     for i,task in enumerate(tasks):
         datasets[(i,"train")]=generate_dataset(task, cfg.train_samples, cfg.train.seed, eval_split=False)
-        datasets[(i,"test")]=generate_dataset(task, cfg.train_samples, cfg.train.seed, eval_split=True)
+        datasets[(i,"test")]=generate_dataset(task, cfg.test_samples, cfg.train.seed, eval_split=True)
     # base groups for registry sizing (shared live registry)
     dummy_model=TinyNumericTransformer(input_dim=cfg.model.input_dim, seq_len=cfg.model.seq_len,
         embedding_dim=cfg.model.embedding_dim, num_layers=cfg.model.num_layers,
@@ -113,14 +113,62 @@ def main():
         g_t=[p.grad.detach().clone() for p in [g.param for g in exp_groups]]
         registry.capture(expert_model, gradients=g_t, task_name=task_name, auto_allocate=False)
         expert_model.zero_grad(set_to_none=True)
-        # eval all tasks via conditional router (live, no task_id) — for eval we use oracle per-task expert for clean metric, plus router-based
+        # eval all tasks: ORACLE (task→expert) vs LIKELIHOOD g(x) (live, no task_id) — Patch A
+        # Oracle — hard isolation upper bound (uses task_id)
         for i in range(phase+1):
             test_loader=torch.utils.data.DataLoader(datasets[(i,"test")], batch_size=2000, shuffle=False)
-            # isolated eval: use the expert that was trained for that task (hard isolation → 0% forgetting)
             exp_m, _ = expert_reg.expert_for_task(task_names[i])
             acc,_,_=evaluate(exp_m, test_loader, device, loss_fn)
             accuracy_matrix[i][phase]=round(acc,2)
-            print(f"    task {i+1} {task_names[i]} acc {acc:.2f} (expert {i})")
+            print(f"    task {i+1} {task_names[i]} acc {acc:.2f} (oracle expert {i})")
+        # Support-set router g(support) — live, no task_id, uses 32 labeled support samples to infer expert
+        if phase == num_tasks-1:
+            print(f"  [Support-set g(x) — 32 labeled support, no task_id]")
+            for i in range(phase+1):
+                # sample 32 support from test set of task i (labeled)
+                sup_ds = datasets[(i,"test")]
+                # sample 32 random
+                g = torch.Generator().manual_seed(100+i)
+                idx = torch.randperm(len(sup_ds), generator=g)[:32]
+                sup_x = torch.stack([sup_ds[j][0] for j in idx]).to(device).float()
+                sup_y = torch.stack([sup_ds[j][1] for j in idx]).to(device).float()
+                # pick expert with lowest loss on support
+                best_eid = 0
+                best_loss = float("inf")
+                with torch.no_grad():
+                    for eid in range(len(expert_reg.experts)):
+                        logits = expert_reg.get_expert(eid)(sup_x)
+                        loss = torch.nn.BCEWithLogitsLoss()(logits, sup_y)
+                        if loss.item() < best_loss:
+                            best_loss = loss.item()
+                            best_eid = eid
+                # eval that expert on full test
+                test_loader=torch.utils.data.DataLoader(datasets[(i,"test")], batch_size=2000, shuffle=False)
+                exp_m = expert_reg.get_expert(best_eid)
+                acc,_,_=evaluate(exp_m, test_loader, device, loss_fn)
+                print(f"    task {i+1} {task_names[i]} support acc {acc:.2f} (picked expert {best_eid}, true {i})")
+                # also keep likelihood for comparison
+                # (optional) compute likelihood acc as before for reference
+                test_loader2=torch.utils.data.DataLoader(datasets[(i,"test")], batch_size=256, shuffle=False)
+                correct=0; total=0
+                with torch.no_grad():
+                    for x,y in test_loader2:
+                        x,y=x.to(device).float(), y.to(device).float()
+                        all_logits = []
+                        for eid in range(len(expert_reg.experts)):
+                            all_logits.append(expert_reg.get_expert(eid)(x))
+                        logits_all = torch.stack(all_logits, dim=1)
+                        conf = logits_all.abs()
+                        pred_expert = torch.argmax(conf, dim=1)
+                        for b in range(x.size(0)):
+                            eid = int(pred_expert[b].item())
+                            logit = logits_all[b, eid]
+                            pred = int((torch.sigmoid(logit) >= 0.5).item())
+                            if pred == int(y[b].item()):
+                                correct+=1
+                            total+=1
+                acc_lik = 100*correct/total
+                print(f"      (likelihood max|logit| acc {acc_lik:.2f} for ref)")
         print()
     mat=np.array(accuracy_matrix,dtype=float)
     from .metrics import compute_forgetting
@@ -128,6 +176,7 @@ def main():
     pd.DataFrame(mat, index=task_names, columns=[f"after_t{i+1}" for i in range(num_tasks)]).to_csv(outdir/"task_accuracies.csv")
     pd.DataFrame({"task":task_names,"initial_accuracy":np.round(metric["initial"],4),"final_accuracy":np.round(metric["final"],4),"forgetting":np.round(metric["forgetting"],4)}).to_csv(outdir/"forgetting.csv", index=False)
     print("="*60)
+    print("ORACLE (task→expert) — isolated upper bound:")
     for i,n in enumerate(task_names):
         print(f"{n}: init {metric['initial'][i]:.2f} final {metric['final'][i]:.2f} forgetting {metric['forgetting'][i]:.2f}")
     print(f"Avg forgetting {metric['average_forgetting']:.2f} overwritten {np.nanmean(metric['forgetting'][:-1]):.2f}")
