@@ -1,7 +1,7 @@
 {
-  "steps": 390,
+  "steps": 60,
   "meta_batch": 8,
-  "governor_params": 1777,
+  "governor_params": 1838,
   "base_params": 17249,
   "controlled_weights": 17249,
   "granularity": "weight",
@@ -48,23 +48,24 @@
     "old_tasks_max": 2,
     "agg": "ewc"
   },
-  "training_seconds": 444.2,
+  "hmem_mode": "none",
+  "training_seconds": 67.5,
   "mask_stats_last": {
-    "mask_mean": 0.0199,
-    "mask_std": 0.0137,
-    "mask_min": 0.0019,
-    "mask_max": 0.3581,
-    "frac_lt_0.1": 0.9981,
+    "mask_mean": 0.2474,
+    "mask_std": 0.0254,
+    "mask_min": 0.106,
+    "mask_max": 0.3016,
+    "frac_lt_0.1": 0.0,
     "frac_gt_0.9": 0.0
   },
   "meta_eval": {
     "pairs": 24.0,
-    "acc_a_before_mean": 0.7864,
-    "acc_a_gated_mean": 0.7832,
-    "acc_a_ungated_mean": 0.7575,
-    "acc_b_gated_mean": 0.6593,
-    "acc_b_ungated_mean": 0.7349,
-    "old_task_retention_gain": 0.0257,
-    "new_task_cost": -0.0755
+    "acc_a_before_mean": 0.8076,
+    "acc_a_gated_mean": 0.811,
+    "acc_a_ungated_mean": 0.7615,
+    "acc_b_gated_mean": 0.656,
+    "acc_b_ungated_mean": 0.6892,
+    "old_task_retention_gain": 0.0496,
+    "new_task_cost": -0.0332
   }
 }

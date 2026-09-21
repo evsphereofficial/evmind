@@ -137,6 +137,18 @@ class RairawConfig:
 
 
 @dataclass
+class RegistryConfig:
+    """Task Registry (Experiment 4) settings."""
+    footprint_method: str = "grad_x_weight"
+    region_size: int = 1000
+    normalize: bool = True
+    use_shadow: bool = False  # shadow tracker: accumulate |grad| online per batch
+    shadow_alpha: float = 0.0  # 0=sum, (0,1)=EMA for long phases
+    learnable: bool = False  # trainable ShadowRecognizer (shadow -> protection)
+    recognizer_hidden: int = 16
+
+
+@dataclass
 class ExperimentConfig:
     """Top-level experiment configuration."""
     run_name: str = "baseline"
@@ -150,6 +162,7 @@ class ExperimentConfig:
     hmem_mode: str = "none"  # input-driven weight-influence channel:
                              # none | grad | random | shuffled | magnitude
     raira: RairawConfig = field(default_factory=RairawConfig)
+    registry: RegistryConfig = field(default_factory=RegistryConfig)
 
     @property
     def num_tasks(self) -> int:
@@ -190,6 +203,7 @@ def load_config(path: str) -> ExperimentConfig:
     governor = GovernorConfig(**raw.get("governor", {}))
     meta = MetaConfig(**raw.get("meta", {}))
     raira = RairawConfig(**raw.get("raira", {}))
+    registry = RegistryConfig(**raw.get("registry", {}))
 
     return ExperimentConfig(
         run_name=str(raw.get("run_name", "baseline")),
@@ -201,5 +215,6 @@ def load_config(path: str) -> ExperimentConfig:
         governor=governor,
         meta=meta,
         raira=raira,
+        registry=registry,
         hmem_mode=str(raw.get("hmem", {}).get("mode", "none")),
     )

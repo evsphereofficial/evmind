@@ -1,0 +1,6 @@
+region_43(head.weight),region_44(head.bias),region_0(input_proj.weight),region_21(encoder.layers.0.norm2.weight),region_41(encoder.layers.1.norm2.weight),region_1(input_proj.bias),region_22(encoder.layers.0.norm2.bias)
+26.8314,18.2666,4.977,3.4842,2.9181,,
+15.2104,8.3529,,3.0407,,3.84,2.9053
+20.7365,22.4651,4.1728,,,4.1103,3.8296
+18.566,12.9311,3.5753,,,4.7655,4.1411
+34.5378,35.8568,,,4.7296,6.1482,4.7125

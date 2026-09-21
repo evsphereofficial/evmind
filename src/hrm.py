@@ -226,6 +226,7 @@ class HRMIntentGovernor(nn.Module):
         init_mask: float = 0.5,
         global_feat_dim: int = 9,
         per_weight_feat_dim: int = 8,
+        registry_feat_dim: int = 2,
         # log1p|gB|, log1p|W|, log1p(I_mem), cos(g_mem,gB),
         # sign(g_mem.gB)log1p|g_mem.gB|, log1p|gA_imm|,
         # rel-change history, position (onehot+ctx appended)
@@ -235,12 +236,14 @@ class HRMIntentGovernor(nn.Module):
         self.granularity = granularity
         self.num_groups = num_groups
         self.refine_steps = refine_steps
+        self.registry_feat_dim = registry_feat_dim
 
         # input width: plus 1 for the recursive refinement channel (prev mean gate)
-        w_in = per_weight_feat_dim + num_groups + global_feat_dim + 1
+        # plus registry_feat_dim for task registry features (param importance + region ownership)
+        w_in = per_weight_feat_dim + num_groups + global_feat_dim + 1 + registry_feat_dim
         # module: group stats (|g|,|p|,|gp|,log1p|g|,log1p g^2,log1p I_mem,
-        # log1p|g_mem.gB|) + context
-        m_in = 7 + global_feat_dim + 1
+        # log1p|g_mem.gB|) + context + registry
+        m_in = 7 + global_feat_dim + 1 + registry_feat_dim
         in_dim = w_in if granularity == "weight" else m_in
 
         self.mlp = nn.Sequential(
@@ -280,11 +283,16 @@ class HRMIntentGovernor(nn.Module):
         p_list: list[torch.Tensor],
         g_list: list[torch.Tensor],
         global_feats: torch.Tensor,
+        groups: list[ParamGroup] | None = None,
         g_old_list: list[torch.Tensor] | None = None,
         hist_list: list[torch.Tensor] | None = None,
         mem_imp_list: list[torch.Tensor] | None = None,
         mem_dir_list: list[torch.Tensor] | None = None,
         hmem_list: list[torch.Tensor] | None = None,
+        registry_param_protection: torch.Tensor | None = None,
+        registry_region_protection: torch.Tensor | None = None,
+        registry_regions: list | None = None,
+        registry_group_sizes: list[int] | None = None,
     ) -> list[torch.Tensor]:
         """Return one gate tensor per group, shapes matching p_list.
 
@@ -296,17 +304,23 @@ class HRMIntentGovernor(nn.Module):
                   updating helps old memory; conflicting -> harms it
             sign(g_mem.gB)*log1p|g_mem.gB|: raw conflict magnitude
             gA_imm (immediate old-task gradient): most recent task's
-                  sensitivity — kept alongside the accumulated memory
+                  sensitivity -- kept alongside the accumulated memory
             gB magnitude, |W|, rel-change history, position
             h_mem (input influence, when enabled): batch-normalized
-                  per-weight input-influence field log1p(I_hat) — an
+                  per-weight input-influence field log1p(I_hat) -- an
                   additional INFORMATION CHANNEL only; the HRM still
                   controls all weights.
+            registry_param_protection: per-weight old-task importance from TaskRegistry
+            registry_region_protection: per-region ownership score from TaskRegistry
         g_old_list: per-weight gradient of the most recent OLD-task loss
         (immediate-task signal).
         mem_imp_list/mem_dir_list: accumulated importance + direction
         across ALL prior tasks (persistent old-knowledge representation).
         hmem_list: per-weight input-influence field (compute_influence).
+        registry_param_protection: (N,) per-parameter importance from TaskRegistry
+        registry_region_protection: (R,) per-region importance from TaskRegistry
+        registry_regions: list of Region objects from TaskRegistry
+        registry_group_sizes: list of group sizes for region mapping
         """
         sizes = [p.numel() for p in p_list]
         G = len(sizes)
@@ -334,6 +348,27 @@ class HRMIntentGovernor(nn.Module):
             hmem_all = None
         else:
             hmem_all = torch.cat([v.detach().flatten() for v in hmem_list])
+
+        # Registry features: per-parameter importance + per-region ownership
+        registry_param_all = None
+        if registry_param_protection is not None:
+            registry_param_all = registry_param_protection.detach().flatten()
+        registry_region_per_weight = None
+        if (registry_region_protection is not None and registry_regions is not None
+                and registry_group_sizes is not None):
+            # Map region-level importance back to per-weight features
+            region_per_weight = torch.zeros(N, device=p_all.device)
+            offset = 0
+            for g_idx, grp_size in enumerate(registry_group_sizes):
+                for r in registry_regions:
+                    if r.group_name == groups[g_idx].name:
+                        r_start = offset + r.start
+                        r_stop = min(offset + r.stop, offset + grp_size)
+                        if r_start < offset + grp_size:
+                            region_per_weight[r_start:r_stop] = (
+                                registry_region_protection[r.region_id])
+                offset += grp_size
+            registry_region_per_weight = region_per_weight
 
         gids = torch.repeat_interleave(torch.arange(G, device=p_all.device),
                                        torch.tensor(sizes, device=p_all.device))
@@ -364,6 +399,19 @@ class HRMIntentGovernor(nn.Module):
                     feats,
                     torch.log1p(hmem_all.abs() + eps).unsqueeze(-1),
                 ], dim=-1)
+            # Always add registry features (zeros when None) to match MLP input dim
+            N_reg = p_all.shape[0]
+            if registry_param_all is not None:
+                reg_feat = torch.log1p(registry_param_all.abs() + eps).unsqueeze(-1)
+                reg_feat = reg_feat.clamp(0, 10)
+                feats = torch.cat([feats, reg_feat], dim=-1)
+            else:
+                feats = torch.cat([feats, torch.zeros(N_reg, 1, device=p_all.device)], dim=-1)
+            if registry_region_per_weight is not None:
+                reg_feat = registry_region_per_weight.unsqueeze(-1).clamp(0, 10)
+                feats = torch.cat([feats, reg_feat], dim=-1)
+            else:
+                feats = torch.cat([feats, torch.zeros(N_reg, 1, device=p_all.device)], dim=-1)
         else:
             # module-level: segment-reduced stats per group (vectorized)
             counts = torch.zeros(G, device=p_all.device)
@@ -417,6 +465,10 @@ class HRMIntentGovernor(nn.Module):
         mem_imp_list: list[torch.Tensor] | None = None,
         mem_dir_list: list[torch.Tensor] | None = None,
         hmem_list: list[torch.Tensor] | None = None,
+        registry_param_protection: torch.Tensor | None = None,
+        registry_region_protection: torch.Tensor | None = None,
+        registry_regions: list | None = None,
+        registry_group_sizes: list[int] | None = None,
     ) -> list[torch.Tensor]:
         """Gate tensors computed from a live model's params + .grad."""
         p_list = [g.param.detach().flatten() for g in groups]
@@ -424,8 +476,10 @@ class HRMIntentGovernor(nn.Module):
         global_feats = compute_global_features(
             x, y, loss,
             torch.cat(g_list), torch.cat(p_list), device)
-        return self.gate(p_list, g_list, global_feats, g_old_list, hist_list,
-                         mem_imp_list, mem_dir_list, hmem_list)
+        return self.gate(p_list, g_list, global_feats, groups, g_old_list, hist_list,
+                         mem_imp_list, mem_dir_list, hmem_list,
+                         registry_param_protection, registry_region_protection,
+                         registry_regions, registry_group_sizes)
 
     def gate_from_state(
         self,
@@ -442,6 +496,10 @@ class HRMIntentGovernor(nn.Module):
         mem_imp_list: list[torch.Tensor] | None = None,
         mem_dir_list: list[torch.Tensor] | None = None,
         hmem_list: list[torch.Tensor] | None = None,
+        registry_param_protection: torch.Tensor | None = None,
+        registry_region_protection: torch.Tensor | None = None,
+        registry_regions: list | None = None,
+        registry_group_sizes: list[int] | None = None,
     ) -> list[torch.Tensor]:
         """Gate tensors from a functional parameter dict (meta-training path)."""
         p_list = [p_cur[g.name].detach().flatten() for g in groups]
@@ -449,11 +507,15 @@ class HRMIntentGovernor(nn.Module):
         global_feats = compute_global_features(
             x, y, loss, torch.cat(g_flat), torch.cat(p_list), device)
         if differentiable:
-            return self.gate(p_list, g_flat, global_feats, g_old_list,
-                             hist_list, mem_imp_list, mem_dir_list, hmem_list)
+            return self.gate(p_list, g_flat, global_feats, groups, g_old_list,
+                             hist_list, mem_imp_list, mem_dir_list, hmem_list,
+                             registry_param_protection, registry_region_protection,
+                             registry_regions, registry_group_sizes)
         with torch.no_grad():
-            return self.gate(p_list, g_flat, global_feats, g_old_list,
-                             hist_list, mem_imp_list, mem_dir_list, hmem_list)
+            return self.gate(p_list, g_flat, global_feats, groups, g_old_list,
+                             hist_list, mem_imp_list, mem_dir_list, hmem_list,
+                             registry_param_protection, registry_region_protection,
+                             registry_regions, registry_group_sizes)
 
     def total_masks(self, groups: list[ParamGroup]) -> int:
         return sum(g.size for g in groups)
@@ -566,6 +628,10 @@ class HRMController:
         snapshot: dict[str, torch.Tensor] | None = None,
         memory: SensitivityMemory | None = None,
         hmem_list: list[torch.Tensor] | None = None,
+        registry_param_protection: torch.Tensor | None = None,
+        registry_region_protection: torch.Tensor | None = None,
+        registry_regions: list | None = None,
+        registry_group_sizes: list[int] | None = None,
     ) -> list[torch.Tensor]:
         """Read-only gate computation (does NOT touch .grad).
 
@@ -575,7 +641,8 @@ class HRMController:
         tasks (SensitivityMemory) -> "how costly is changing this weight to
         everything learned so far?". snapshot: phase-start params ->
         rel-change history. hmem_list: input-driven influence field
-        (additional context channel; full weight control is retained)."""
+        (additional context channel; full weight control is retained).
+        registry_*: TaskRegistry protection signals."""
         hist_list = None
         if snapshot is not None:
             eps = 1e-8
@@ -588,9 +655,12 @@ class HRMController:
         if memory is not None and not memory.is_empty():
             mem_imp = memory.importance()
             mem_dir = memory.direction()
+        group_sizes = [g.size for g in self.groups]
         return self.governor.gate_from_model(
             model, self.groups, x, y, loss, self.device,
-            g_old_list, hist_list, mem_imp, mem_dir, hmem_list)
+            g_old_list, hist_list, mem_imp, mem_dir, hmem_list,
+            registry_param_protection, registry_region_protection,
+            registry_regions, group_sizes)
 
     @torch.no_grad()
     def scale_update(

@@ -1,0 +1,100 @@
+# EvMind Registry — HRM Governor + Task Registry (no RAIRAW, no H_MEM).
+# Same base model + task protocol as Phase 2, but replaces SensitivityMemory
+# with explicit per-parameter footprints and region-level marks from
+# TaskRegistry. The governor receives 2 additional input features:
+#   1. log1p(|old_task_importance|) — per-parameter summed footprint
+#   2. region_ownership_score — per-region max importance
+#
+# Run:
+#   .venv/bin/python -m src.meta_pretrain_registry --config configs/registry.yaml
+#   .venv/bin/python -m src.experiment4 --config configs/registry.yaml
+
+run_name: registry
+
+# No h_mem channel — replaced by registry features.
+hmem:
+  mode: none
+
+train_samples: 10000
+test_samples: 2000
+
+tasks:
+  - name: horizontal
+    type: horizontal
+  - name: vertical
+    type: vertical
+  - name: circle
+    type: circle
+    params:
+      r: 0.55
+  - name: diagonal
+    type: diagonal
+  - name: xor_quadrant
+    type: xor
+
+model:
+  input_dim: 2
+  seq_len: 2
+  embedding_dim: 32
+  num_layers: 2
+  num_heads: 2
+  ff_dim: 64
+  dropout: 0.0
+
+train:
+  seed: 0
+  learning_rate: 0.001
+  batch_size: 128
+  epochs_per_task: 5
+  optimizer: adamw
+  weight_decay: 0.0
+  num_workers: 0
+
+governor:
+  hidden_dim: 24
+  refine_steps: 2
+  init_mask: 0.5
+  granularity: weight
+  close_threshold: 0.02
+
+# Task Registry settings (NEW).
+registry:
+  # How to compute per-parameter importance after each task.
+  # "grad_x_weight" = |grad| * |weight| (sensitivity * magnitude)
+  # "grad_only" = |grad| (raw gradient sensitivity)
+  # "weight_only" = |weight| (parameter magnitude)
+  # "binary" = hard marks where |grad| > threshold
+  footprint_method: grad_x_weight
+  # Max weights per region (regions never span modules).
+  region_size: 1000
+  # Normalize footprints to mean=1 for stable feature scale.
+  normalize: true
+  # Shadow tracker: online per-weight occupancy (non-trainable).
+  # Accumulates |grad| per batch throughout the phase; footprint at
+  # capture uses the whole-phase usage, not just the final gradient.
+  use_shadow: true
+  shadow_alpha: 0.0  # 0=sum, 0.9=EMA
+  # Learnable recognizer: shadow_norm -> protection, trained jointly
+  # with governor. Task-ID'd via separate footprints[t]; shared MLP.
+  learnable: true
+  recognizer_hidden: 16
+
+meta:
+  steps: 390
+  meta_batch: 8
+  batch_size: 512
+  warmup_batches: 12
+  warmup_lr: 0.002
+  burst_steps: 3
+  lr: 0.001
+  burst_optim: adamw
+  burst_lr: 0.03
+  close_threshold: 0.02
+  lambda_old: 1.0
+  lambda_sparse: 1.0
+  sparse_target: 0.3
+  lambda_ewc: 0.3
+  lambda_delta: 0.5
+  eval_pairs: 24
+  old_tasks_max: 2
+  memory_agg: ewc
