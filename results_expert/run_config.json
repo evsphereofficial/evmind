@@ -1,0 +1,60 @@
+{
+  "expert_summary": {
+    "num_experts": 5,
+    "per_expert": [
+      {
+        "task": "horizontal",
+        "k": 469
+      },
+      {
+        "task": "vertical",
+        "k": 991
+      },
+      {
+        "task": "circle",
+        "k": 1488
+      },
+      {
+        "task": "diagonal",
+        "k": 728
+      },
+      {
+        "task": "xor_quadrant",
+        "k": 1744
+      }
+    ],
+    "occupied": 5420
+  },
+  "metric": {
+    "initial": [
+      99.58,
+      99.86,
+      98.27,
+      98.19,
+      99.47
+    ],
+    "best": [
+      99.58,
+      99.86,
+      98.27,
+      98.19,
+      99.47
+    ],
+    "final": [
+      99.58,
+      99.86,
+      98.27,
+      98.19,
+      99.47
+    ],
+    "forgetting": [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "average_forgetting": 0.0,
+    "final_average_accuracy": 99.074
+  }
+}

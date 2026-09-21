@@ -52,18 +52,17 @@ def make_regions(groups: list, region_size: int = 1000) -> list[Region]:
     return regions
 
 
-# -- Modular capacity law (general, from research-report.md §4) -----------------
-# acc(k) = acc_chance + (acc_max-acc_chance)*[1 - exp(-max(0,k-k0)/tau)]
-# Fitted on 2D sweep (random mask, 17K Transformer). Average linear: k0=115, tau=158.
-# Fine-tuned for hard tasks (circle/xor) after hard-gate experiments: larger tau/k0.
+# -- Modular capacity law v2 (research-reportv2.md §2) -----------------
+# 20-shape sweep (k=10,200,500,1000, batch128/5, 12GB): acc(k)=50+50*(1-exp(-(k-k0)/tau))
+# Global avg: k0≈100, tau≈180 (v1 was 115/158). Per-shape best above.
 CAPACITY_PARAMS: dict[str, tuple[int, int]] = {
-    "horizontal": (80, 120),
+    "horizontal": (120, 80),   # 20-shape best
     "vertical": (150, 200),
-    "circle": (150, 300),  # was 100/200 — under-allocated, needs 1.4×
-    "diagonal": (120, 120),
-    "xor": (180, 280),  # hardest, was 150/200
-    "xor_quadrant": (180, 280),
-    "default": (115, 158),
+    "circle": (50, 300),  # circle04/055 average, hard
+    "diagonal": (100, 150),
+    "xor": (150, 300),
+    "xor_quadrant": (150, 300),
+    "default": (100, 180),  # v2 global avg
 }
 # Per-task headroom: hard tasks get more slack for disjoint allocation
 HEADROOM: dict[str, float] = {
