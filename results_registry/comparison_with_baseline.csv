@@ -1,6 +1,6 @@
 task,forgetting_phase1,forgetting_registry,delta
-horizontal,49.05,26.95,-22.1
-vertical,51.0,25.65,-25.35
-circle,48.75,19.9,-28.85
-diagonal,50.65,23.9,-26.75
+horizontal,49.05,23.65,-25.4
+vertical,51.0,8.85,-42.15
+circle,48.75,17.05,-31.7
+diagonal,50.65,8.4,-42.25
 xor_quadrant,0.0,0.0,0.0

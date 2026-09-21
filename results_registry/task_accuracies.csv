@@ -1,6 +1,6 @@
 ,after_t1,after_t2,after_t3,after_t4,after_t5
-horizontal,99.65,52.25,51.1,74.8,72.7
-vertical,,96.95,50.0,74.4,71.3
-circle,,,74.9,49.4,55.0
-diagonal,,,,99.75,75.85
-xor_quadrant,,,,,67.8
+horizontal,99.65,67.15,51.65,74.8,76.0
+vertical,,82.05,50.55,74.2,73.2
+circle,,,74.35,52.2,57.3
+diagonal,,,,96.95,88.55
+xor_quadrant,,,,,60.3

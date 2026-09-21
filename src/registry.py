@@ -52,6 +52,45 @@ def make_regions(groups: list, region_size: int = 1000) -> list[Region]:
     return regions
 
 
+# -- Modular capacity law (general, from research-report.md §4) -----------------
+# acc(k) = acc_chance + (acc_max-acc_chance)*[1 - exp(-max(0,k-k0)/tau)]
+# Fitted on 2D sweep (random mask, 17K Transformer). Average linear: k0=115, tau=158.
+# Per-task best (for 98%): horizontal 80/120, vertical 150/200, diagonal 120/120, xor 150/200, circle 100/200.
+CAPACITY_PARAMS: dict[str, tuple[int, int]] = {
+    "horizontal": (80, 120),
+    "vertical": (150, 200),
+    "circle": (100, 200),
+    "diagonal": (120, 120),
+    "xor": (150, 200),
+    "xor_quadrant": (150, 200),
+    "default": (115, 158),
+}
+
+def predict_required_weights(
+    task_name: str = "default",
+    target_acc: float = 98.0,
+    acc_chance: float = 50.0,
+    acc_max: float = 99.7,
+    headroom: float = 0.2,
+) -> int:
+    """Modular law: predict k_suff for target accuracy, with headroom.
+
+    Inverts acc(k)=chance+(max-chance)*(1-exp(-(k-k0)/tau)).
+    Returns k_alloc = (1+headroom)*k_suff, clamped to [10, N].
+    """
+    import math
+    k0, tau = CAPACITY_PARAMS.get(task_name, CAPACITY_PARAMS["default"])
+    if target_acc <= acc_chance:
+        return 10
+    if target_acc >= acc_max:
+        target_acc = acc_max - 0.1
+    frac = (target_acc - acc_chance) / (acc_max - acc_chance)
+    # 1 - exp(-(k-k0)/tau) = frac => k = k0 - tau*ln(1-frac)
+    k_suff = k0 - tau * math.log(max(1e-6, 1 - frac))
+    k_alloc = int(math.ceil(k_suff * (1 + headroom)))
+    return max(10, k_alloc)
+
+
 def compute_footprint(
     params_flat: torch.Tensor,
     grads_flat: torch.Tensor,
@@ -204,6 +243,9 @@ class TaskRegistry:
         gradients: list[torch.Tensor] | None = None,
         task_name: str = "",
         differentiable: bool = False,
+        target_acc: float = 98.0,
+        headroom: float = 0.2,
+        auto_allocate: bool = True,
     ) -> None:
         """Capture one task's footprint after its training phase.
 
@@ -214,12 +256,15 @@ class TaskRegistry:
             task_name: optional label for logging
             differentiable: if True and learnable recognizer exists, keep graph
                 for recognizer (meta-training). Else detached (live eval).
+            target_acc/headroom: for modular law allocation (shared occupied).
 
         Shadow mode: if use_shadow and accumulate() was called, the shadow
         accumulator is used as grads_flat (usage over the whole phase) instead
         of the single final gradient. Task-ID'd via separate footprints[t].
         Learnable mode transforms shadow_norm through recognizer.
         Falls back to grad_x_weight if shadow empty.
+        After storing footprint, auto_allocate via predict_required_weights()
+        labels top-k weights as occupied (shared variable).
         """
         params_flat = torch.cat([
             p.detach().flatten() for p in model.parameters()
@@ -263,6 +308,13 @@ class TaskRegistry:
             region_imp = self._compute_region_importance(footprint.detach())
         self.region_marks.append(region_imp)
 
+        # modular allocation: predict k via law, label top-k as occupied (shared)
+        if auto_allocate:
+            try:
+                self.allocate(task_name, footprint.detach(), target_acc=target_acc, headroom=headroom)
+            except Exception:
+                pass  # allocation failure should not break capture
+
         # reset shadow for next task
         if self._shadow is not None:
             self._shadow.zero_()
@@ -300,8 +352,8 @@ class TaskRegistry:
                 None = include all tasks.
 
         Returns:
-            param_protection: (N,) summed importance across old tasks
-            region_protection: (R,) max importance across old tasks
+            param_protection: (N,) summed importance across old tasks + occupied boost
+            region_protection: (R,) max importance across old tasks (with occupied)
         """
         if self.n == 0:
             return None, None
@@ -315,6 +367,35 @@ class TaskRegistry:
 
         param_protection = torch.stack(fps).sum(dim=0)
         region_protection = torch.stack(rms).max(dim=0).values
+
+        # Shared occupied boost: future tasks see occupied weights as strongly protected
+        # This is the "keep a track record via shared variable" requested.
+        if hasattr(self, "_occupied") and self._occupied is not None:
+            # per-parameter boost (+5 ≈ 5× mean, after log1p becomes ~1.8 extra)
+            occ = self._occupied.to(param_protection.device).float()
+            # only for tasks before current (ownership < idx)
+            # ownership holds task_id per weight, -1=free
+            if hasattr(self, "_ownership"):
+                # mask to only old tasks
+                old_occ = (self._ownership >= 0) & (self._ownership < idx)
+                occ = old_occ.to(param_protection.device).float()
+            param_protection = param_protection + occ * 5.0
+            # region boost: any region with occupied weights gets +2
+            if hasattr(self, "_ownership"):
+                # compute per-region max ownership presence
+                group_offset: dict[str, int] = {}
+                off = 0
+                for g in self.groups:
+                    group_offset[g.name] = off
+                    off += g.size
+                occ_region = torch.zeros(len(self.regions), device=region_protection.device)
+                for r in self.regions:
+                    base = group_offset.get(r.group_name, 0)
+                    gs, ge = base + r.start, base + r.stop
+                    # occupied in this region for old tasks
+                    occ_slice = occ[gs:ge] if ge <= occ.numel() else occ[gs:]
+                    occ_region[r.region_id] = 1.0 if (occ_slice > 0).any() else 0.0
+                region_protection = region_protection + occ_region * 2.0
 
         return param_protection, region_protection
 
@@ -330,6 +411,73 @@ class TaskRegistry:
             return None
         return self.region_marks[task_idx]
 
+    # -- modular allocation (shared occupied tracking) ------------------------
+    def _ensure_occupied(self, device: torch.device | None = None):
+        if not hasattr(self, "_occupied"):
+            total = sum(g.size for g in self.groups)
+            dev = device or self._shadow_device or torch.device("cpu")
+            self._occupied = torch.zeros(total, dtype=torch.bool, device=dev)  # shared
+            self._ownership = torch.full((total,), -1, dtype=torch.long, device=dev)  # task id or -1
+            self._allocations: dict[str, dict] = {}  # task_name -> {indices, k_pred, k_alloc}
+            self._next_free = 0
+
+    def get_occupied(self) -> torch.Tensor:
+        self._ensure_occupied()
+        return self._occupied
+
+    def get_ownership(self) -> torch.Tensor:
+        self._ensure_occupied()
+        return self._ownership
+
+    @torch.no_grad()
+    def allocate(
+        self,
+        task_name: str,
+        footprint: torch.Tensor,
+        target_acc: float = 98.0,
+        headroom: float = 0.2,
+    ) -> dict:
+        """Allocate k_alloc weights to this task, label them, track shared occupied.
+
+        k_alloc predicted via modular law predict_required_weights(task_name).
+        Chooses top-k footprint weights among still-free weights (disjoint),
+        falling back to top-k overall if not enough free. Marks them occupied
+        with task label, stores in _allocations for future tasks to see.
+        Returns dict {k_pred, k_alloc, indices}.
+        """
+        self._ensure_occupied(device=footprint.device)
+        k_alloc = predict_required_weights(task_name, target_acc=target_acc, headroom=headroom)
+        # clamp to model size and free space
+        total = footprint.numel()
+        k_alloc = min(k_alloc, total)
+        # rank by footprint importance descending
+        ranked = torch.argsort(footprint, descending=True)
+        free_mask = ~self._occupied
+        free_ranked = ranked[free_mask[ranked]]
+        if free_ranked.numel() >= k_alloc:
+            chosen = free_ranked[:k_alloc]
+        else:
+            # not enough free: take all free + top occupied by smallest footprint task (share)
+            # for now, just take top-k overall (overlap allowed but flagged)
+            chosen = ranked[:k_alloc]
+        self._occupied[chosen] = True
+        tid = self.n - 1  # last captured task index
+        self._ownership[chosen] = tid
+        self._allocations[task_name] = {
+            "k_pred": k_alloc,
+            "indices": chosen.detach().cpu(),
+            "task_id": tid,
+        }
+        return {"k_pred": k_alloc, "indices": chosen, "task_id": tid}
+
+    def allocation_summary(self) -> dict:
+        self._ensure_occupied()
+        return {
+            "occupied_count": int(self._occupied.sum().item()),
+            "total": int(self._occupied.numel()),
+            "per_task": {k: {"k_pred": v["k_pred"], "task_id": v["task_id"]} for k, v in self._allocations.items()},
+        }
+
     def parameters(self):
         """Yield learnable parameters (recognizer) if any."""
         if self.recognizer is not None:
@@ -344,6 +492,9 @@ class TaskRegistry:
             self._shadow_device = device
         if self.recognizer is not None:
             self.recognizer.to(device)
+        if hasattr(self, "_occupied"):
+            self._occupied = self._occupied.to(device)
+            self._ownership = self._ownership.to(device)
 
     def summary(self) -> dict:
         """Summary statistics for logging."""

@@ -319,18 +319,22 @@ def main() -> None:
         update_fractions[phase] = measure_update_fraction(model, snapshot)
         rel_changes[phase] = measure_rel_change(model, snapshot)
 
-        # Capture this task's footprint into the registry
-        registry.capture(model, gradients=last_grads, task_name=task_name)
+        # Capture this task's footprint into the registry (modular law allocation inside)
+        registry.capture(model, gradients=last_grads, task_name=task_name, target_acc=98.0, headroom=0.2)
         summary = registry.summary()
+        alloc = registry.allocation_summary()
         registry_snapshots.append({
             "task": task_name, "phase": phase + 1,
             "n_regions": registry.num_regions,
             "footprint_mean": summary.get("footprint_mean", 0),
             "footprint_max": summary.get("footprint_max", 0),
+            "k_alloc": alloc["per_task"].get(task_name, {}).get("k_pred", 0),
+            "occupied": f"{alloc['occupied_count']}/{alloc['total']}",
         })
+        k_pred = alloc["per_task"].get(task_name, {}).get("k_pred", 0)
         print(f"  registry: {registry.n} task(s), "
-              f"footprint_mean={summary.get('footprint_mean', 0):.4f}, "
-              f"regions={registry.num_regions}")
+              f"k_pred={k_pred} via law, occupied {alloc['occupied_count']}/{alloc['total']}, "
+              f"footprint_mean={summary.get('footprint_mean', 0):.4f}")
 
         # Evaluate all learned tasks
         print(f"  Evaluating task(s): {', '.join(task_names[: phase + 1])}")
@@ -368,10 +372,17 @@ def main() -> None:
     pd.DataFrame(registry_snapshots).to_csv(
         outdir / "registry_snapshots.csv", index=False)
 
-    # Region ownership breakdown
+    # Region ownership breakdown + allocation log
     region_ownership = registry.region_weights_per_task()
     pd.DataFrame(region_ownership).to_csv(
         outdir / "region_ownership.csv", index=False)
+    # Save occupied mask and ownership for shared variable
+    alloc_sum = registry.allocation_summary()
+    occ = registry.get_occupied().cpu().numpy()
+    own = registry.get_ownership().cpu().numpy()
+    np.save(outdir / "occupied.npy", occ)
+    np.save(outdir / "ownership.npy", own)
+    pd.DataFrame([{"task": k, "k_pred": v["k_pred"], "task_id": v["task_id"]} for k, v in alloc_sum["per_task"].items()]).to_csv(outdir / "allocation.csv", index=False)
 
     peak_vram_mb = None
     if torch.cuda.is_available():
@@ -394,6 +405,7 @@ def main() -> None:
             "normalize": registry_normalize,
             "num_regions": registry.num_regions,
             "tasks_captured": registry.n,
+            "allocation": registry.allocation_summary(),
         },
         "training_time_seconds": {
             f"task{i+1}": round(t, 3) for i, t in train_times.items()},

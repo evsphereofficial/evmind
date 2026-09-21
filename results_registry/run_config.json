@@ -117,33 +117,59 @@
     "region_size": 1000,
     "normalize": true,
     "num_regions": 45,
-    "tasks_captured": 5
+    "tasks_captured": 5,
+    "allocation": {
+      "occupied_count": 4127,
+      "total": 17249,
+      "per_task": {
+        "horizontal": {
+          "k_pred": 583,
+          "task_id": 0
+        },
+        "vertical": {
+          "k_pred": 991,
+          "task_id": 1
+        },
+        "circle": {
+          "k_pred": 931,
+          "task_id": 2
+        },
+        "diagonal": {
+          "k_pred": 631,
+          "task_id": 3
+        },
+        "xor_quadrant": {
+          "k_pred": 991,
+          "task_id": 4
+        }
+      }
+    }
   },
   "training_time_seconds": {
-    "task1": 8.397,
-    "task2": 7.395,
-    "task3": 7.718,
-    "task4": 6.896,
-    "task5": 6.912
+    "task1": 7.078,
+    "task2": 7.39,
+    "task3": 7.606,
+    "task4": 7.223,
+    "task5": 7.156
   },
-  "total_training_seconds": 37.317,
-  "peak_vram_mb": 31.29,
-  "peak_ram_mb": 1465.68,
-  "final_average_accuracy": 68.53,
-  "average_forgetting": 19.280000000000005,
-  "average_forgetting_overwritten": 24.100000000000005,
+  "total_training_seconds": 36.453,
+  "peak_vram_mb": 31.44,
+  "peak_ram_mb": 1517.75,
+  "final_average_accuracy": 71.07000000000001,
+  "average_forgetting": 11.59,
+  "average_forgetting_overwritten": 14.4875,
   "update_fractions": {
     "task1": 99.62316656038031,
-    "task2": 99.38547162154327,
-    "task3": 99.49562293466288,
-    "task4": 99.61157168531508,
-    "task5": 99.44924343440199
+    "task2": 99.31010493361934,
+    "task3": 99.32169980868456,
+    "task4": 99.31590237115195,
+    "task5": 99.0144356194562
   },
   "mean_rel_changes": {
     "task1": 4405.302025900319,
-    "task2": 5.869733773733906,
-    "task3": 1.038916493043432,
-    "task4": 0.5815579346702273,
-    "task5": 1.1634251166070844
+    "task2": 5.022226324834829,
+    "task3": 0.9824340363868095,
+    "task4": 0.5335083154897238,
+    "task5": 0.6823331407142867
   }
 }

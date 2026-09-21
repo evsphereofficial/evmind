@@ -1,0 +1,6 @@
+task,k_pred,task_id
+horizontal,583,0
+vertical,991,1
+circle,931,2
+diagonal,631,3
+xor_quadrant,991,4
