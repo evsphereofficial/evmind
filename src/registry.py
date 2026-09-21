@@ -55,15 +55,25 @@ def make_regions(groups: list, region_size: int = 1000) -> list[Region]:
 # -- Modular capacity law (general, from research-report.md §4) -----------------
 # acc(k) = acc_chance + (acc_max-acc_chance)*[1 - exp(-max(0,k-k0)/tau)]
 # Fitted on 2D sweep (random mask, 17K Transformer). Average linear: k0=115, tau=158.
-# Per-task best (for 98%): horizontal 80/120, vertical 150/200, diagonal 120/120, xor 150/200, circle 100/200.
+# Fine-tuned for hard tasks (circle/xor) after hard-gate experiments: larger tau/k0.
 CAPACITY_PARAMS: dict[str, tuple[int, int]] = {
     "horizontal": (80, 120),
     "vertical": (150, 200),
-    "circle": (100, 200),
+    "circle": (150, 300),  # was 100/200 — under-allocated, needs 1.4×
     "diagonal": (120, 120),
-    "xor": (150, 200),
-    "xor_quadrant": (150, 200),
+    "xor": (180, 280),  # hardest, was 150/200
+    "xor_quadrant": (180, 280),
     "default": (115, 158),
+}
+# Per-task headroom: hard tasks get more slack for disjoint allocation
+HEADROOM: dict[str, float] = {
+    "horizontal": 0.2,
+    "vertical": 0.2,
+    "circle": 0.4,
+    "diagonal": 0.2,
+    "xor": 0.5,
+    "xor_quadrant": 0.5,
+    "default": 0.2,
 }
 
 def predict_required_weights(
@@ -71,15 +81,18 @@ def predict_required_weights(
     target_acc: float = 98.0,
     acc_chance: float = 50.0,
     acc_max: float = 99.7,
-    headroom: float = 0.2,
+    headroom: float | None = None,
 ) -> int:
     """Modular law: predict k_suff for target accuracy, with headroom.
 
     Inverts acc(k)=chance+(max-chance)*(1-exp(-(k-k0)/tau)).
     Returns k_alloc = (1+headroom)*k_suff, clamped to [10, N].
+    Headroom defaults to per-task HEADROOM (harder tasks more).
     """
     import math
     k0, tau = CAPACITY_PARAMS.get(task_name, CAPACITY_PARAMS["default"])
+    if headroom is None:
+        headroom = HEADROOM.get(task_name, HEADROOM["default"])
     if target_acc <= acc_chance:
         return 10
     if target_acc >= acc_max:
@@ -244,7 +257,7 @@ class TaskRegistry:
         task_name: str = "",
         differentiable: bool = False,
         target_acc: float = 98.0,
-        headroom: float = 0.2,
+        headroom: float | None = None,
         auto_allocate: bool = True,
     ) -> None:
         """Capture one task's footprint after its training phase.
@@ -435,7 +448,7 @@ class TaskRegistry:
         task_name: str,
         footprint: torch.Tensor,
         target_acc: float = 98.0,
-        headroom: float = 0.2,
+        headroom: float | None = None,
     ) -> dict:
         """Allocate k_alloc weights to this task, label them, track shared occupied.
 

@@ -127,17 +127,49 @@ def train_one_epoch_registry(
         last_grads = [g.detach().clone() for g in cur_grads]
 
         # Governor gates with registry features
-        masks = controller.compute_masks(
+        masks = list(controller.compute_masks(
             model, x, y, loss, g_old_list=g_old_list, snapshot=snapshot,
             registry_param_protection=param_prot,
             registry_region_protection=region_prot,
             registry_regions=registry_regions,
-            registry_group_sizes=registry_group_sizes)
+            registry_group_sizes=registry_group_sizes))
+        # Hard gate for occupied weights (shared variable): never overwrite labelled weights
+        if registry.n > 0 and hasattr(registry, "_occupied"):
+            occ = registry.get_occupied()
+            if occ.any():
+                # map global occupied mask to per-group masks, force gate=0
+                offset = 0
+                for gi, g in enumerate(controller.groups):
+                    sz = g.size
+                    g_occ = occ[offset:offset+sz].reshape(g.param.shape)
+                    if g_occ.any():
+                        mf = masks[gi].reshape(g.param.shape)
+                        mf = torch.where(g_occ, torch.zeros_like(mf), mf)
+                        masks[gi] = mf.flatten()
+                    offset += sz
         pre = {g.name: g.param.detach().clone() for g in controller.groups}
         optimizer.step()
         controller.scale_update(model, masks, pre)
         if close_threshold > 0.0:
             controller.zero_closed_moments(optimizer, masks, threshold=close_threshold)
+        # Enforce hard closed for occupied in Adam moments as well
+        if registry.n > 0 and hasattr(registry, "_occupied"):
+            occ = registry.get_occupied()
+            if occ.any():
+                offset = 0
+                for gi, g in enumerate(controller.groups):
+                    sz = g.size
+                    g_occ = occ[offset:offset+sz].reshape(g.param.shape)
+                    if g_occ.any():
+                        st = optimizer.state.get(g.param)
+                        if st is not None:
+                            for key in ("exp_avg", "exp_avg_sq"):
+                                buf = st.get(key)
+                                if buf is not None:
+                                    buf.masked_fill_(g_occ, 0.0)
+                    offset += sz
+                # offset already handled, but keep for completeness
+                pass
 
         if step == 0 or step == len(loader) - 1:
             stats = mask_stats(masks)
