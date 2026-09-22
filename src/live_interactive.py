@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-EvAGI Interactive Live Learning — TinyTalk (V3 dynamic allocation).
-Each fact gets a DIFFERENT number of neurons based on difficulty.
-No hardcoded neuron counts — Equation V3 calculates per-fact.
+EvAGI Interactive — TinyTalk with Governor.
+Normal conversation works naturally.
+Fact recall uses expert masks only when needed.
 """
 
-import json, math, torch, torch.nn as nn, re
+import json, math, torch, re
 from pathlib import Path
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
@@ -16,19 +16,12 @@ SAVE_DIR = Path("results_tinytalk_interactive")
 SAVE_DIR.mkdir(exist_ok=True)
 CHECKPOINT = SAVE_DIR / "evagi_state.pt"
 
-# V3 calibration constants (from 8-point sweep on TinyTalk)
-# These are BASE values — per-fact k0/tau are derived from probing
 K0_BASE = 102_257
 TAU_BASE = 7_399
-
-# Probe config: small initial allocation to measure difficulty
-PROBE_NEURONS = 8  # neurons for initial difficulty probe
+PROBE_NEURONS = 8
 PROBE_EPOCHS = 5
 
 
-# ============================================================================
-# EvAGI Components
-# ============================================================================
 class SoftExpertContext:
     def __init__(self, layers, masks, alpha=0.0):
         self.layers, self.masks, self.alpha = layers, masks, alpha
@@ -72,7 +65,6 @@ class WeightRegister:
         self.pool = pool
         self.used = 0
         self.occupied = [torch.zeros(n, dtype=torch.bool, device=device) for n in inter_sizes]
-        self.allocations = []
     def allocate(self, name, counts, expert_id):
         weights_needed = sum(c * WEIGHTS_PER_NEURON for c in counts)
         if self.used + weights_needed > self.pool:
@@ -92,8 +84,6 @@ class WeightRegister:
             masks.append(mask)
         actual = int(sum(m.sum().item() for m in masks))
         self.used += actual * WEIGHTS_PER_NEURON
-        self.allocations.append({"task": name, "expert_id": expert_id,
-                                 "neurons": actual, "weights": actual * WEIGHTS_PER_NEURON})
         return masks
 
 def tokenize_qa(tok, pairs, max_length=128):
@@ -138,22 +128,9 @@ def train_expert(model, tokenizer, layers, qa_pairs, masks, device, epochs=15, l
     model.eval()
     return losses
 
-
-# ============================================================================
-# V3 Dynamic Allocation: probe difficulty → calculate k → allocate
-# ============================================================================
 def v3_probe_and_allocate(model, tokenizer, layers, qa_pairs, inter_sizes,
                           device, register, expert_id, fact_name):
-    """Two-phase allocation:
-    Phase 1: Train a tiny probe (PROBE_NEURONS) and measure convergence speed.
-    Phase 2: Use convergence rate to set k0/tau → allocate full expert.
-    
-    Easy facts (fast convergence) → fewer neurons
-    Hard facts (slow convergence) → more neurons
-    """
     n_layers = len(inter_sizes)
-
-    # Phase 1: Probe with small allocation
     probe_counts = [max(1, PROBE_NEURONS // n_layers)] * n_layers
     probe_masks = []
     for li, take in enumerate(probe_counts):
@@ -163,42 +140,22 @@ def v3_probe_and_allocate(model, tokenizer, layers, qa_pairs, inter_sizes,
         mask[chosen] = True
         probe_masks.append(mask)
 
-    # Train probe
     probe_losses = train_expert(model, tokenizer, layers, qa_pairs, probe_masks,
                                 device, epochs=PROBE_EPOCHS, lr=5e-4)
 
-    # Measure difficulty: how fast did loss drop?
-    # difficulty = final_loss / initial_loss (lower = easier)
-    if probe_losses[0] > 0:
-        convergence = probe_losses[-1] / probe_losses[0]  # 0.0 = trivial, 1.0 = impossible
-    else:
-        convergence = 0.0
+    init_loss = probe_losses[0]
+    difficulty = max(0.0, min(1.0, (init_loss - 3.0) / 5.0))
+    scale = 0.3 + difficulty * 2.7
 
-    # Free probe neurons (unmark them)
     for li, m in enumerate(probe_masks):
         register.occupied[li] &= ~m
 
-    # Phase 2: Calculate k using V3 with difficulty-adjusted parameters
-    # Use INITIAL loss as difficulty proxy (higher = harder = needs more neurons)
-    # TinyTalk base initial loss ~5.0 for random facts; scale around that.
-    init_loss = probe_losses[0]
-    base_loss = 5.0  # typical initial loss for random tokens
-    difficulty = max(0.0, min(1.0, (init_loss - 3.0) / 5.0))  # 0=easy, 1=hard
-
-    # Easy facts (difficulty < 0.3): fewer neurons
-    # Hard facts (difficulty > 0.7): more neurons
-    scale = 0.3 + difficulty * 2.7  # linear map [0.3, 3.0]
-
     k0_fact = int(K0_BASE * scale)
     tau_fact = int(TAU_BASE * scale)
-
-    # k_suff for 98% accuracy
     frac = 0.98
     k_suff = k0_fact - tau_fact * math.log(1.0 - frac)
     headroom = 1.2
     k_alloc = int(math.ceil(headroom * k_suff))
-
-    # Convert to neuron counts
     n_neurons = max(n_layers, k_alloc // WEIGHTS_PER_NEURON)
     base = n_neurons // n_layers
     rem = n_neurons % n_layers
@@ -208,20 +165,13 @@ def v3_probe_and_allocate(model, tokenizer, layers, qa_pairs, inter_sizes,
           f"difficulty={difficulty:.3f} scale={scale:.2f}")
     print(f"    V3: k0={k0_fact}, tau={tau_fact}, k_alloc={k_alloc}, neurons={sum(counts)}")
 
-    # Allocate full expert
     masks = register.allocate(fact_name, counts, expert_id)
     return masks, {
         "difficulty": difficulty, "scale": scale,
         "k0": k0_fact, "tau": tau_fact,
         "k_alloc": k_alloc, "neurons": sum(counts),
-        "probe_loss_start": probe_losses[0],
-        "probe_loss_end": probe_losses[-1],
     }
 
-
-# ============================================================================
-# Fact Parser
-# ============================================================================
 def parse_learn_command(text):
     t = text.lower().strip()
     if t.startswith(("what", "where", "when", "how", "who", "why",
@@ -252,39 +202,84 @@ def make_prompt(key, value):
             f"User: What's your {key}?\nBot:",
             f"User: Tell me your {key}\nBot:"]
 
-def route_keyword(prompt, facts_dict):
-    pl = prompt.lower()
-    for kind in sorted(facts_dict.keys(), key=len, reverse=True):
-        if kind in pl: return kind
+# ============================================================================
+# Governor: decides if this is a fact query or normal chat
+# ============================================================================
+def is_fact_query(prompt, fact_keys):
+    """Returns (is_fact, fact_key) if the prompt is asking about a learned fact."""
+    pl = prompt.lower().strip()
+
+    # Question words + known fact key = fact query
+    question_starts = ("what", "where", "when", "who", "how", "which",
+                       "tell me", "do you", "can you", "could you")
+    if not any(pl.startswith(q) or (" " + q + " ") in pl or pl.endswith("?") for q in question_starts):
+        return False, None
+
+    # Check for known fact key
     aliases = {
         "name": ["name", "called", "who are"],
         "color": ["color", "colour", "favorite color"],
-        "city": ["city", "live", "home", "where", "from"],
-        "food": ["food", "eat", "favorite food", "favorite"],
+        "city": ["city", "live", "home", "where"],
+        "food": ["food", "eat", "favorite food"],
         "work": ["work", "job", "employ", "company"],
     }
-    for kind, words in aliases.items():
-        if kind in facts_dict:
-            for w in words:
-                if w in pl: return kind
-    return None
-
+    for kind in fact_keys:
+        if kind in pl:
+            return True, kind
+        if kind in aliases:
+            for alias in aliases[kind]:
+                if alias in pl:
+                    return True, kind
+    return False, None
 
 # ============================================================================
-# Main
+# Two-pass generation: normal chat first, fact recall if needed
 # ============================================================================
+def generate_reply(model, tokenizer, layers, prompt, fact_masks=None,
+                   fact_key=None, device=None, max_tokens=50):
+    """Smart generation:
+    1. First, try normal generation (no mask) — keeps conversation natural
+    2. If fact_key is set AND expert exists, also generate with mask for fact recall
+    3. Return the best response
+    """
+    inputs = tokenizer(prompt, return_tensors="pt").to(device)
+
+    # Normal generation (full model, no mask)
+    with torch.no_grad():
+        out_normal = model.generate(
+            **inputs, max_new_tokens=max_tokens,
+            temperature=0.7, do_sample=True, top_p=0.9,
+            pad_token_id=tokenizer.eos_token_id)
+    normal_reply = tokenizer.decode(out_normal[0][inputs["input_ids"].shape[1]:],
+                                     skip_special_tokens=True).strip()
+
+    # If we have a fact expert, also generate with mask
+    if fact_masks is not None and fact_key is not None:
+        with torch.no_grad():
+            with SoftExpertContext(layers, fact_masks, alpha=0.0):
+                out_expert = model.generate(
+                    **inputs, max_new_tokens=max_tokens,
+                    temperature=0.7, do_sample=True, top_p=0.9,
+                    pad_token_id=tokenizer.eos_token_id)
+        expert_reply = tokenizer.decode(out_expert[0][inputs["input_ids"].shape[1]:],
+                                         skip_special_tokens=True).strip()
+        return normal_reply, expert_reply
+
+    return normal_reply, None
+
+
 def main():
     print("=" * 70)
-    print("EvAGI Interactive Live Learning — V3 Dynamic Allocation")
+    print("EvAGI Interactive — TinyTalk with Governor")
     print("=" * 70)
-    print("Each fact gets DIFFERENT neurons based on difficulty probing.")
+    print("Normal chat works naturally. Fact recall uses expert masks.")
     print()
     print("Commands:")
-    print("  remember/learn/know X  — learn a new fact (V3 dynamic)")
-    print("  ask a question         — recall from learned facts")
-    print("  facts                  — list facts with neuron counts")
-    print("  save                   — save checkpoint")
-    print("  quit                   — exit (auto-saves)")
+    print("  tell me to remember/learn X  — learn a new fact")
+    print("  ask a question               — recall from facts (expert mask)")
+    print("  chat naturally               — normal conversation (no mask)")
+    print("  facts                        — list learned facts")
+    print("  quit                         — exit (auto-saves)")
     print()
 
     tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
@@ -301,9 +296,8 @@ def main():
     fact_index = {}
     fact_values = {}
     fact_keys = []
-    fact_meta = {}  # kind -> V3 allocation metadata
+    fact_meta = {}
 
-    # Load checkpoint
     if CHECKPOINT.exists():
         model_dir = SAVE_DIR / "model"
         if model_dir.exists():
@@ -325,21 +319,6 @@ def main():
             for li, m in enumerate(expert_masks):
                 register.occupied[li] |= m
         print(f"  Loaded: {len(fact_index)} facts, {register.used:,}/{register.pool:,} weights")
-
-    def generate(prompt, expert_mask=None, max_tokens=30):
-        inputs = tokenizer(prompt, return_tensors="pt").to(device)
-        with torch.no_grad():
-            if expert_mask is not None:
-                with SoftExpertContext(layers, expert_mask, alpha=0.0):
-                    out = model.generate(**inputs, max_new_tokens=max_tokens,
-                                        temperature=0.7, do_sample=True, top_p=0.9,
-                                        pad_token_id=tokenizer.eos_token_id)
-            else:
-                out = model.generate(**inputs, max_new_tokens=max_tokens,
-                                    temperature=0.7, do_sample=True, top_p=0.9,
-                                    pad_token_id=tokenizer.eos_token_id)
-        return tokenizer.decode(out[0][inputs["input_ids"].shape[1]:],
-                                skip_special_tokens=True).strip()
 
     def save_checkpoint():
         model.save_pretrained(SAVE_DIR / "model")
@@ -377,9 +356,9 @@ def main():
                     n = int(masks_per_expert[eid][0].sum().item())
                     w = n * WEIGHTS_PER_NEURON
                     m = fact_meta.get(k, {})
-                    conv = m.get("difficulty", "?")
+                    diff = m.get("difficulty", "?")
                     print(f"    [{eid}] {k} = {v}  "
-                          f"({n} neurons, {w:,} weights, convergence={conv})")
+                          f"({n} neurons, {w:,} weights, difficulty={diff})")
                 print(f"  Pool: {register.used:,}/{register.pool:,} "
                       f"({100*register.used/register.pool:.1f}%)\n")
             continue
@@ -395,8 +374,6 @@ def main():
 
             if key in fact_index:
                 eid = fact_index[key]
-                print(f"  Updating expert {eid}")
-                # Reallocate with V3
                 masks, meta = v3_probe_and_allocate(
                     model, tokenizer, layers,
                     [(p, " " + value) for p in make_prompt(key, value)],
@@ -415,15 +392,20 @@ def main():
             fact_values[key] = value
             fact_meta[key] = meta
 
-            # Full training with allocated neurons
             final_losses = train_expert(
                 model, tokenizer, layers,
                 [(p, " " + value) for p in make_prompt(key, value)],
                 masks_per_expert[eid], device, epochs=15, lr=5e-4)
 
-            # Recall test
             test_prompt = make_prompt(key, value)[0]
-            reply = generate(test_prompt, expert_mask=masks_per_expert[eid])
+            inputs = tokenizer(test_prompt, return_tensors="pt").to(device)
+            with torch.no_grad():
+                with SoftExpertContext(layers, masks_per_expert[eid], alpha=0.0):
+                    out = model.generate(**inputs, max_new_tokens=30,
+                                        temperature=0.7, do_sample=True, top_p=0.9,
+                                        pad_token_id=tokenizer.eos_token_id)
+            reply = tokenizer.decode(out[0][inputs["input_ids"].shape[1]:],
+                                      skip_special_tokens=True).strip()
             hit = value.lower() in reply.lower()
             n = int(masks_per_expert[eid][0].sum().item())
             print(f"  Trained: loss={final_losses[-1]:.4f}, "
@@ -432,19 +414,41 @@ def main():
                   f"({100*register.used/register.pool:.1f}%)\n")
             continue
 
-        # Answer question
-        routed = route_keyword(user_input, fact_values)
-        if routed and routed in fact_index:
-            eid = fact_index[routed]
-            prompt = user_input if user_input.rstrip().endswith((":", "A:", "Answer:")) else user_input.rstrip() + " A:"
-            reply = generate(prompt, expert_mask=masks_per_expert[eid])
-            hit = fact_values[routed].lower() in reply.lower()
-            n = int(masks_per_expert[eid][0].sum().item())
-            print(f"  [expert {eid}/{routed}, {n} neurons] {reply}")
-            print(f"  {'Recall OK' if hit else 'Expected: ' + fact_values[routed]}\n")
+        # GOVERNOR: is this a fact query or normal chat?
+        is_fact, fact_key = is_fact_query(user_input, fact_keys)
+
+        if is_fact and fact_key and fact_key in fact_index:
+            # Fact query → generate with expert mask
+            eid = fact_index[fact_key]
+            prompt = user_input.rstrip() + "\nBot:" if not user_input.rstrip().endswith("\nBot:") else user_input
+            expert_masks = masks_per_expert[eid]
+            inputs = tokenizer(prompt, return_tensors="pt").to(device)
+
+            with torch.no_grad():
+                with SoftExpertContext(layers, expert_masks, alpha=0.0):
+                    out = model.generate(**inputs, max_new_tokens=50,
+                                        temperature=0.7, do_sample=True, top_p=0.9,
+                                        pad_token_id=tokenizer.eos_token_id)
+            expert_reply = tokenizer.decode(out[0][inputs["input_ids"].shape[1]:],
+                                             skip_special_tokens=True).strip()
+
+            hit = fact_values[fact_key].lower() in expert_reply.lower()
+            n = int(expert_masks[0].sum().item())
+            print(f"  [expert {eid}/{fact_key}, {n} neurons] {expert_reply}")
+            if hit:
+                print(f"  Recall: {fact_values[fact_key]} [OK]\n")
+            else:
+                print(f"  Expected: {fact_values[fact_key]} [MISS]\n")
         else:
-            prompt = user_input if user_input.rstrip().endswith((":", "A:", "Answer:")) else user_input.rstrip() + " A:"
-            reply = generate(prompt)
+            # Normal chat → no mask, full model
+            prompt = user_input.rstrip() + "\nBot:" if not user_input.rstrip().endswith("\nBot:") else user_input
+            inputs = tokenizer(prompt, return_tensors="pt").to(device)
+            with torch.no_grad():
+                out = model.generate(**inputs, max_new_tokens=50,
+                                    temperature=0.7, do_sample=True, top_p=0.9,
+                                    pad_token_id=tokenizer.eos_token_id)
+            reply = tokenizer.decode(out[0][inputs["input_ids"].shape[1]:],
+                                      skip_special_tokens=True).strip()
             print(f"  {reply}\n")
 
 
