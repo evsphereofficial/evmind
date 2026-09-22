@@ -415,15 +415,26 @@ def main():
             f,
             indent=2,
         )
-    # persist masks + governors (small)
+    # persist masks + governors + trained model (for live inference)
+    model.eval()
     torch.save(
         {
             "masks": [[m.cpu() for m in layer_masks] for layer_masks in masks_per_expert],
             "governor_state": [g.state_dict() for g in governors],
             "router_state": router.state_dict(),
+            "model_state": {k: v.cpu() for k, v in model.state_dict().items()},
+            "task_names": task_names,
+            "probe": probe,
+            "metric": {
+                k: (v.tolist() if isinstance(v, np.ndarray) else v)
+                for k, v in metric.items()
+            },
         },
         outdir / "evagi_state.pt",
     )
+    # also save HF-format weights for easy reload
+    model.save_pretrained(outdir / "final_model")
+    tokenizer.save_pretrained(outdir / "final_model")
     print(f"Wrote {outdir}")
 
 

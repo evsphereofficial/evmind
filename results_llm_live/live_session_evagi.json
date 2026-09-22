@@ -1,0 +1,456 @@
+{
+  "engine": "evagi",
+  "n_tasks": 5,
+  "task_names": [
+    "sentiment",
+    "spelling",
+    "capital",
+    "plural",
+    "antonym"
+  ],
+  "turns": [
+    {
+      "turn": 0,
+      "kind": "init",
+      "user": "",
+      "assistant": "",
+      "accuracies": {
+        "sentiment": 100.0,
+        "spelling": 100.0,
+        "capital": 100.0,
+        "plural": 100.0,
+        "antonym": 100.0
+      }
+    },
+    {
+      "turn": 1,
+      "kind": "skill",
+      "user": "Review: I love this story, it made me smile. Is this positive? Answer:",
+      "expert": 0,
+      "answer": "yes",
+      "p_yes": 0.9947313070297241,
+      "support_nll": [
+        0.004068988841027021,
+        2.740020513534546,
+        1.7434301376342773,
+        5.25186014175415,
+        3.7143402099609375
+      ],
+      "skill": "sentiment",
+      "label": 1,
+      "correct": 1,
+      "accuracies": {
+        "sentiment": 100.0,
+        "spelling": 100.0,
+        "capital": 100.0,
+        "plural": 100.0,
+        "antonym": 100.0
+      }
+    },
+    {
+      "turn": 2,
+      "kind": "free",
+      "user": "Once upon a time, a little girl found a",
+      "expert": 1,
+      "generation": "a a a a a,,,,,,,,,,,,,,,,,,,",
+      "accuracies": {
+        "sentiment": 100.0,
+        "spelling": 100.0,
+        "capital": 100.0,
+        "plural": 100.0,
+        "antonym": 100.0
+      }
+    },
+    {
+      "turn": 3,
+      "kind": "skill",
+      "user": "Is the word 'apple' spelled correctly? Answer:",
+      "expert": 1,
+      "answer": "yes",
+      "p_yes": 0.9994507431983948,
+      "support_nll": [
+        5.112771034240723,
+        0.0018037159461528063,
+        1.3494290113449097,
+        3.5713798999786377,
+        9.325420379638672
+      ],
+      "skill": "spelling",
+      "label": 1,
+      "correct": 1,
+      "accuracies": {
+        "sentiment": 100.0,
+        "spelling": 100.0,
+        "capital": 100.0,
+        "plural": 100.0,
+        "antonym": 100.0
+      }
+    },
+    {
+      "turn": 4,
+      "kind": "skill",
+      "user": "Is the word 'appel' spelled correctly? Answer:",
+      "expert": 1,
+      "answer": "no",
+      "p_yes": 0.000662157020997256,
+      "support_nll": [
+        5.112771034240723,
+        0.0018037159461528063,
+        1.3494290113449097,
+        3.5713798999786377,
+        9.325420379638672
+      ],
+      "skill": "spelling",
+      "label": 0,
+      "correct": 1,
+      "accuracies": {
+        "sentiment": 100.0,
+        "spelling": 100.0,
+        "capital": 100.0,
+        "plural": 100.0,
+        "antonym": 100.0
+      }
+    },
+    {
+      "turn": 5,
+      "kind": "free",
+      "user": "The cat sat on the",
+      "expert": 4,
+      "generation": "!!!!!!!!!!!!!!!!!!!!!!!!",
+      "accuracies": {
+        "sentiment": 100.0,
+        "spelling": 100.0,
+        "capital": 100.0,
+        "plural": 100.0,
+        "antonym": 100.0
+      }
+    },
+    {
+      "turn": 6,
+      "kind": "skill",
+      "user": "Is the capital of France Paris? Answer:",
+      "expert": 2,
+      "answer": "yes",
+      "p_yes": 0.9937673807144165,
+      "support_nll": [
+        5.947244644165039,
+        7.126236915588379,
+        0.00837012194097042,
+        3.35495662689209,
+        12.077680587768555
+      ],
+      "skill": "capital",
+      "label": 1,
+      "correct": 1,
+      "accuracies": {
+        "sentiment": 100.0,
+        "spelling": 100.0,
+        "capital": 100.0,
+        "plural": 100.0,
+        "antonym": 100.0
+      }
+    },
+    {
+      "turn": 7,
+      "kind": "skill",
+      "user": "Is 'children' the plural of 'child'? Answer:",
+      "expert": 3,
+      "answer": "yes",
+      "p_yes": 0.9980760812759399,
+      "support_nll": [
+        5.900163173675537,
+        9.397493362426758,
+        2.7815675735473633,
+        0.00058208336122334,
+        9.328348159790039
+      ],
+      "skill": "plural",
+      "label": 1,
+      "correct": 1,
+      "accuracies": {
+        "sentiment": 100.0,
+        "spelling": 100.0,
+        "capital": 100.0,
+        "plural": 100.0,
+        "antonym": 100.0
+      }
+    },
+    {
+      "turn": 8,
+      "kind": "free",
+      "user": "In a small village lived a",
+      "expert": 2,
+      "generation": "every every every every every every every every every every every every every every every every every every every every every every every every",
+      "accuracies": {
+        "sentiment": 100.0,
+        "spelling": 100.0,
+        "capital": 100.0,
+        "plural": 100.0,
+        "antonym": 100.0
+      }
+    },
+    {
+      "turn": 9,
+      "kind": "skill",
+      "user": "Are 'hot' and 'cold' opposites? Answer:",
+      "expert": 4,
+      "answer": "yes",
+      "p_yes": 0.999495267868042,
+      "support_nll": [
+        3.5540671348571777,
+        5.478784561157227,
+        6.638883590698242,
+        3.195443868637085,
+        0.0008834670297801495
+      ],
+      "skill": "antonym",
+      "label": 1,
+      "correct": 1,
+      "accuracies": {
+        "sentiment": 100.0,
+        "spelling": 100.0,
+        "capital": 100.0,
+        "plural": 100.0,
+        "antonym": 100.0
+      }
+    },
+    {
+      "turn": 10,
+      "kind": "skill",
+      "user": "Review: What a terrible day, everything went wrong. Is this positive? Answer:",
+      "expert": 0,
+      "answer": "no",
+      "p_yes": 0.0027913355734199286,
+      "support_nll": [
+        0.004068988841027021,
+        2.740020513534546,
+        1.7434301376342773,
+        5.25186014175415,
+        3.7143402099609375
+      ],
+      "skill": "sentiment",
+      "label": 0,
+      "correct": 1,
+      "accuracies": {
+        "sentiment": 100.0,
+        "spelling": 100.0,
+        "capital": 100.0,
+        "plural": 100.0,
+        "antonym": 100.0
+      }
+    },
+    {
+      "turn": 11,
+      "kind": "skill",
+      "user": "Is the capital of Japan Tokyo? Answer:",
+      "expert": 2,
+      "answer": "yes",
+      "p_yes": 0.9856438636779785,
+      "support_nll": [
+        5.947244644165039,
+        7.126236915588379,
+        0.00837012194097042,
+        3.35495662689209,
+        12.077680587768555
+      ],
+      "skill": "capital",
+      "label": 1,
+      "correct": 1,
+      "accuracies": {
+        "sentiment": 100.0,
+        "spelling": 100.0,
+        "capital": 100.0,
+        "plural": 100.0,
+        "antonym": 100.0
+      }
+    },
+    {
+      "turn": 12,
+      "kind": "skill",
+      "user": "Is 'mouses' the plural of 'mouse'? Answer:",
+      "expert": 3,
+      "answer": "no",
+      "p_yes": 0.002296478021889925,
+      "support_nll": [
+        5.900163173675537,
+        9.397493362426758,
+        2.7815675735473633,
+        0.00058208336122334,
+        9.328348159790039
+      ],
+      "skill": "plural",
+      "label": 0,
+      "correct": 1,
+      "accuracies": {
+        "sentiment": 100.0,
+        "spelling": 100.0,
+        "capital": 100.0,
+        "plural": 100.0,
+        "antonym": 100.0
+      }
+    },
+    {
+      "turn": 13,
+      "kind": "free",
+      "user": "And they all lived",
+      "expert": 2,
+      "generation": "........................",
+      "accuracies": {
+        "sentiment": 100.0,
+        "spelling": 100.0,
+        "capital": 100.0,
+        "plural": 100.0,
+        "antonym": 100.0
+      }
+    }
+  ],
+  "accuracy_matrix": [
+    [
+      100.0,
+      100.0,
+      100.0,
+      100.0,
+      100.0
+    ],
+    [
+      100.0,
+      100.0,
+      100.0,
+      100.0,
+      100.0
+    ],
+    [
+      100.0,
+      100.0,
+      100.0,
+      100.0,
+      100.0
+    ],
+    [
+      100.0,
+      100.0,
+      100.0,
+      100.0,
+      100.0
+    ],
+    [
+      100.0,
+      100.0,
+      100.0,
+      100.0,
+      100.0
+    ],
+    [
+      100.0,
+      100.0,
+      100.0,
+      100.0,
+      100.0
+    ],
+    [
+      100.0,
+      100.0,
+      100.0,
+      100.0,
+      100.0
+    ],
+    [
+      100.0,
+      100.0,
+      100.0,
+      100.0,
+      100.0
+    ],
+    [
+      100.0,
+      100.0,
+      100.0,
+      100.0,
+      100.0
+    ],
+    [
+      100.0,
+      100.0,
+      100.0,
+      100.0,
+      100.0
+    ],
+    [
+      100.0,
+      100.0,
+      100.0,
+      100.0,
+      100.0
+    ],
+    [
+      100.0,
+      100.0,
+      100.0,
+      100.0,
+      100.0
+    ],
+    [
+      100.0,
+      100.0,
+      100.0,
+      100.0,
+      100.0
+    ],
+    [
+      100.0,
+      100.0,
+      100.0,
+      100.0,
+      100.0
+    ]
+  ],
+  "live_metrics": {
+    "average_forgetting": 0.0,
+    "final_average_accuracy": 100.0,
+    "per_task": {
+      "sentiment": {
+        "best": 100.0,
+        "final": 100.0,
+        "forgetting": 0.0
+      },
+      "spelling": {
+        "best": 100.0,
+        "final": 100.0,
+        "forgetting": 0.0
+      },
+      "capital": {
+        "best": 100.0,
+        "final": 100.0,
+        "forgetting": 0.0
+      },
+      "plural": {
+        "best": 100.0,
+        "final": 100.0,
+        "forgetting": 0.0
+      },
+      "antonym": {
+        "best": 100.0,
+        "final": 100.0,
+        "forgetting": 0.0
+      }
+    }
+  },
+  "probe": {
+    "sentiment": 50.67,
+    "spelling": 50.33,
+    "capital": 48.0,
+    "plural": 39.0,
+    "antonym": 49.33
+  },
+  "chat_skill_accuracy": 100.0,
+  "chat_skill_hits": 9,
+  "chat_skill_total": 9,
+  "chat_per_skill": {
+    "sentiment": 100.0,
+    "spelling": 100.0,
+    "capital": 100.0,
+    "plural": 100.0,
+    "antonym": 100.0
+  },
+  "chat_misses": []
+}

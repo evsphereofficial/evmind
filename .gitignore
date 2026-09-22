@@ -5,3 +5,4 @@ __pycache__/
 *.egg-info/
 *.pt
 results_llm_baseline/final_model/
+results_llm_evagi/final_model/
