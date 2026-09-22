@@ -70,6 +70,10 @@ CAPACITY_PARAMS: dict[str, tuple[int, int]] = {
     "capital": (100, 150),
     "plural": (50, 300),
     "antonym": (150, 300),
+    # Live mid-chat facts (name/color/...) — associative, easy-ish
+    "fact": (100, 120),
+    "fact_name": (80, 100),
+    "fact_color": (80, 100),
     "default": (100, 180),  # v2 global avg
 }
 # Per-task headroom: hard tasks get more slack for disjoint allocation
@@ -85,6 +89,9 @@ HEADROOM: dict[str, float] = {
     "capital": 0.2,
     "plural": 0.4,
     "antonym": 0.5,
+    "fact": 0.3,
+    "fact_name": 0.3,
+    "fact_color": 0.3,
     "default": 0.2,
 }
 

@@ -314,6 +314,202 @@ def support_pick_expert(
     return best, losses
 
 
+@torch.no_grad()
+def support_pick_expert_qa(
+    model: nn.Module,
+    layers: nn.ModuleList,
+    masks_per_expert: list[list[torch.Tensor]],
+    tokenizer,
+    qa_pairs: list[tuple[str, str]],
+    device,
+    max_length: int,
+) -> tuple[int, list[float]]:
+    """Pick expert with min free-text answer NLL (for mid-chat fact recall)."""
+    from .llm_tasks import tokenize_qa
+
+    enc = tokenize_qa(tokenizer, qa_pairs, max_length=max_length)
+    input_ids = enc["input_ids"].to(device)
+    attention = enc["attention_mask"].to(device)
+    labels = enc["labels"].to(device)
+    shift_logits_mask = labels[:, 1:].contiguous() != -100
+
+    losses: list[float] = []
+    model.eval()
+    for eid in range(len(masks_per_expert)):
+        with ExpertMaskContext(layers, masks_per_expert, [eid]):
+            out = model(input_ids=input_ids, attention_mask=attention)
+        shift_logits = out.logits[:, :-1, :].contiguous()
+        shift_labels = labels[:, 1:].contiguous()
+        vocab = shift_logits.size(-1)
+        flat_logits = shift_logits.view(-1, vocab)
+        flat_lab = shift_labels.view(-1).clamp(min=0)
+        nll = torch.nn.functional.cross_entropy(flat_logits, flat_lab, ignore_index=-100)
+        losses.append(float(nll.item()))
+    best = int(min(range(len(losses)), key=lambda i: losses[i]))
+    return best, losses
+
+
+def train_fact_expert(
+    model,
+    tokenizer,
+    layers,
+    qa_pairs: list[tuple[str, str]],
+    masks: list[torch.Tensor],
+    governor: TinyPerExpertGovernor,
+    router: HRMRouter,
+    router_expert_id: int,
+    cfg: dict,
+    device,
+    max_length: int,
+    epochs: int | None = None,
+    lr: float | None = None,
+) -> dict:
+    """Mid-chat fact install: full EvAGI stack on free-text QA.
+
+    Equation V2 already chose `masks` via the caller (Register.allocate).
+    Here: TinyPerExpertGovernor gates + hard grad mask + HRM router step.
+    """
+    from torch.utils.data import DataLoader, TensorDataset
+
+    from .llm_tasks import tokenize_qa
+
+    enc = tokenize_qa(tokenizer, qa_pairs, max_length=max_length)
+    ds = TensorDataset(enc["input_ids"], enc["attention_mask"], enc["labels"])
+    bs = int(cfg.get("batch_size", 8))
+    loader = DataLoader(ds, batch_size=min(bs, len(ds)), shuffle=True)
+
+    ffn_params = [p for p in model.parameters() if p.requires_grad]
+    gov_params = list(governor.parameters())
+    router_params = list(router.parameters())
+    _lr = float(lr if lr is not None else cfg.get("lr", 1e-4))
+    opt = torch.optim.AdamW(ffn_params + gov_params, lr=_lr,
+                            weight_decay=float(cfg.get("weight_decay", 0.01)))
+    router_opt = torch.optim.AdamW(router_params, lr=_lr)
+    _epochs = int(epochs if epochs is not None else cfg.get("epochs_per_task", 3))
+    gov_l1 = float(cfg.get("gov_l1", 1e-4))
+
+    model.train()
+    governor.train()
+    router.train()
+
+    history = []
+    for epoch in range(_epochs):
+        running = 0.0
+        r_running = 0.0
+        n = 0
+        for input_ids, attention_mask, labels in loader:
+            input_ids = input_ids.to(device)
+            attention_mask = attention_mask.to(device)
+            labels = labels.to(device)
+
+            gates: list[torch.Tensor] = []
+            gate_means: list[torch.Tensor] = []
+            for li, layer in enumerate(layers):
+                m = masks[li]
+                w = layer.mlp.c_fc.weight
+                g = w.grad if w.grad is not None else torch.zeros_like(w)
+                feats, idx = neuron_features(w.detach(), g.detach(), m, li, len(layers))
+                if idx.numel() == 0:
+                    gates.append(torch.zeros(w.shape[0], device=device))
+                    continue
+                go = governor(feats)
+                full = torch.zeros(w.shape[0], device=device)
+                full = full.index_add(0, idx, go)
+                gates.append(full)
+                gate_means.append(go.mean())
+
+            opt.zero_grad(set_to_none=True)
+            router_opt.zero_grad(set_to_none=True)
+
+            with ExpertMaskContext(layers, [masks], [0], gates=gates):
+                out = model(input_ids=input_ids, attention_mask=attention_mask)
+                logits = out.logits
+                shift_logits = logits[:, :-1, :].contiguous()
+                shift_labels = labels[:, 1:].contiguous()
+                vocab = shift_logits.size(-1)
+                loss = torch.nn.functional.cross_entropy(
+                    shift_logits.view(-1, vocab),
+                    shift_labels.view(-1).clamp(min=0),
+                    ignore_index=-100,
+                )
+
+            loss.backward(retain_graph=True)
+            hard_mask_grads(layers, masks)
+
+            if gate_means:
+                gov_l1_loss = torch.stack(gate_means).mean() * gov_l1
+                gov_l1_loss.backward()
+            else:
+                gov_l1_loss = torch.tensor(0.0, device=device)
+
+            # HRM router: this live batch belongs to the new fact expert
+            with torch.no_grad():
+                p = torch.sigmoid(out.logits[:, -1, 0])
+                feats_r = torch.stack(
+                    [
+                        input_ids.float().mean() / 50256.0,
+                        input_ids.float().std() / 50256.0,
+                        labels.float().mean() / max(1.0, float(labels.max())),
+                        torch.log1p(loss.detach()),
+                        p.mean(),
+                        p.std(),
+                        (p > 0.5).float().mean(),
+                        input_ids.new_tensor(float(input_ids.size(0))) / 128.0,
+                        input_ids.new_tensor(float(len(layers))) / 8.0,
+                    ]
+                )
+            logits_r = router(feats_r.unsqueeze(0))
+            # expand-safe: if router is smaller, skip (caller should rebuild)
+            if logits_r.size(-1) > router_expert_id:
+                rloss = torch.nn.functional.cross_entropy(
+                    logits_r, torch.tensor([router_expert_id], device=device)
+                )
+                rloss.backward()
+                r_running += float(rloss.item())
+            else:
+                rloss = None
+
+            torch.nn.utils.clip_grad_norm_(ffn_params + gov_params, 1.0)
+            opt.step()
+            router_opt.step()
+
+            running += float(loss.item())
+            n += 1
+        rec = {
+            "epoch": epoch + 1,
+            "loss": running / max(n, 1),
+            "router_loss": r_running / max(n, 1),
+        }
+        history.append(rec)
+        print(f"    live epoch {epoch + 1}/{_epochs} loss={rec['loss']:.4f} "
+              f"router_loss={rec['router_loss']:.3f}")
+
+    for p in governor.parameters():
+        p.requires_grad_(False)
+    model.eval()
+    governor.eval()
+    router.eval()
+    return {"history": history, "final_loss": history[-1]["loss"] if history else None}
+
+
+def expand_router(router: HRMRouter, new_num_experts: int, device) -> HRMRouter:
+    """Grow HRMRouter output head for a newly installed live expert."""
+    old_sd = router.state_dict()
+    # net: Linear-ReLU-Linear-ReLU-Linear
+    feat_dim = router.net[0].in_features
+    hidden = router.net[0].out_features
+    new = HRMRouter(num_experts=new_num_experts, hidden=hidden, feat_dim=feat_dim).to(device)
+    new_sd = new.state_dict()
+    for k, v in old_sd.items():
+        if k.endswith("net.4.weight") or k.endswith("net.4.bias"):
+            old_rows = v.shape[0]
+            new_sd[k][:old_rows] = v
+        else:
+            new_sd[k] = v
+    new.load_state_dict(new_sd)
+    return new
+
+
 class HRMRouter(nn.Module):
     """Main HRM router: global batch features -> expert logits (9 -> h -> E)."""
 

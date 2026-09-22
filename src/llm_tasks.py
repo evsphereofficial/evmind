@@ -206,3 +206,147 @@ def yes_no_token_ids(tokenizer) -> tuple[int, int]:
         yes_enc = tokenizer.encode("yes", add_special_tokens=False)
         no_enc = tokenizer.encode("no", add_special_tokens=False)
     return yes_enc[0], no_enc[0]
+
+
+def tokenize_qa(tokenizer, pairs, max_length: int = 96):
+    """Encode (prompt, answer_str) -> tensors for free-text causal LM.
+
+    Same layout as tokenize_pairs but answer is an arbitrary string
+    (used for mid-chat fact learning: name, color, ...).
+    """
+    import torch
+
+    prompt_ids = []
+    label_ids = []
+    for prompt, answer in pairs:
+        p = tokenizer(
+            prompt, add_special_tokens=True, truncation=True,
+            max_length=max_length - 8,
+        )["input_ids"]
+        a = tokenizer(answer, add_special_tokens=False)["input_ids"]
+        if tokenizer.eos_token_id is not None:
+            a = a + [tokenizer.eos_token_id]
+        prompt_ids.append(p)
+        label_ids.append(a)
+
+    max_p = max(len(p) for p in prompt_ids)
+    max_a = max(len(a) for a in label_ids)
+    total = max_p + max_a
+    pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
+
+    input_ids = torch.full((len(pairs), total), pad_id, dtype=torch.long)
+    attention = torch.zeros((len(pairs), total), dtype=torch.long)
+    labels = torch.full((len(pairs), total), -100, dtype=torch.long)
+
+    for i, (p, a) in enumerate(zip(prompt_ids, label_ids)):
+        seq = p + a
+        input_ids[i, : len(seq)] = torch.tensor(seq, dtype=torch.long)
+        attention[i, : len(seq)] = 1
+        labels[i, len(p): len(seq)] = torch.tensor(a, dtype=torch.long)
+
+    return {
+        "input_ids": input_ids,
+        "attention_mask": attention,
+        "labels": labels,
+    }
+
+
+def parse_fact(utterance: str) -> dict | None:
+    """Detect mid-chat fact declarations: name / color / city / food."""
+    import re
+
+    s = utterance.strip().rstrip(".!?")
+    patterns = [
+        ("fact_name", r"(?:my name is|i am called|call me|i'm)\s+([A-Za-z][A-Za-z0-9_-]{0,32})"),
+        ("fact_color", r"my favou?rite colour is\s+([A-Za-z][A-Za-z ]{0,24})"),
+        ("fact_color", r"my favou?rite color is\s+([A-Za-z][A-Za-z ]{0,24})"),
+        ("fact_city", r"i live in\s+([A-Za-z][A-Za-z ]{0,32})"),
+        ("fact_city", r"my city is\s+([A-Za-z][A-Za-z ]{0,32})"),
+        ("fact_food", r"my favou?rite food is\s+([A-Za-z][A-Za-z ]{0,32})"),
+        ("fact_food", r"i like to eat\s+([A-Za-z][A-Za-z ]{0,32})"),
+    ]
+    for kind, pat in patterns:
+        m = re.search(pat, s, flags=re.IGNORECASE)
+        if m:
+            value = m.group(1).strip()
+            # strip trailing filler
+            value = re.sub(r"\s+(and|because|so)\b.*$", "", value, flags=re.IGNORECASE).strip()
+            if value:
+                return {"kind": kind, "value": value, "raw": utterance.strip()}
+    return None
+
+
+def fact_qa_pairs(kind: str, value: str, n: int = 24) -> list[tuple[str, str]]:
+    """Paraphrased (prompt, answer) pairs for one mid-chat fact."""
+    if kind == "fact_name":
+        prompts = [
+            "Q: What is your name? A:",
+            "Q: What is my name? A:",
+            "User said: My name is {v}. Q: What is your name? A:",
+            "The user's name is {v}. Q: What is the user's name? A:",
+            "Remember, my name is {v}. What is my name? Answer:",
+            "My name is {v}. What is my name? Answer:",
+            "Hello, I am {v}. Q: What is your name? A:",
+            "My name is {v}. Answer:",
+        ]
+    elif kind == "fact_color":
+        prompts = [
+            "Q: What is your favorite color? A:",
+            "Q: What is my favorite color? A:",
+            "User said: My favorite color is {v}. Q: What is my favorite color? A:",
+            "My favorite color is {v}. What is my favorite color? Answer:",
+            "I like the color {v}. Q: What color do I like? A:",
+        ]
+    elif kind == "fact_city":
+        prompts = [
+            "Q: What city do you live in? A:",
+            "User said: I live in {v}. Q: Where do you live? A:",
+            "I live in {v}. Q: What city is that? A:",
+            "My city is {v}. What is my city? Answer:",
+        ]
+    elif kind == "fact_food":
+        prompts = [
+            "Q: What is your favorite food? A:",
+            "User said: My favorite food is {v}. Q: What is my favorite food? A:",
+            "My favorite food is {v}. What is my favorite food? Answer:",
+            "I like to eat {v}. Q: What do I like to eat? A:",
+        ]
+    else:
+        prompts = [f"Remember: {value}. Q: What did I say? A:"]
+
+    pairs: list[tuple[str, str]] = []
+    answer = f" {value}"
+    for p in prompts:
+        pairs.append((p.replace("{v}", value), answer))
+    # tile up to n
+    out: list[tuple[str, str]] = []
+    while len(out) < n:
+        out.extend(pairs)
+    return out[:n]
+
+
+def fact_probe_questions(kind: str, value: str) -> list[tuple[str, str]]:
+    """Held-out (prompt, answer) probes for recall after live learning."""
+    answer = f" {value}"
+    if kind == "fact_name":
+        return [
+            ("Q: What is your name? A:", answer),
+            ("What is my name? Answer:", answer),
+            ("Q: Tell me your name. A:", answer),
+        ]
+    if kind == "fact_color":
+        return [
+            ("Q: What is your favorite color? A:", answer),
+            ("What is my favorite color? Answer:", answer),
+        ]
+    if kind == "fact_city":
+        return [
+            ("Q: What city do you live in? A:", answer),
+            ("Where do I live? Answer:", answer),
+        ]
+    if kind == "fact_food":
+        return [
+            ("Q: What is your favorite food? A:", answer),
+            ("What is my favorite food? Answer:", answer),
+        ]
+    return [(f"Q: What was the fact? A:", answer)]

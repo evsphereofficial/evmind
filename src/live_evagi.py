@@ -26,11 +26,26 @@ import torch
 
 from .experiment import set_seed
 from .experiment_llm_evagi import eval_yes_no_accuracy
-from .llm_evagi import ExpertMaskContext, support_pick_expert
+from .llm_evagi import (
+    ExpertMaskContext,
+    HRMRouter,
+    NeuronRegister,
+    TinyPerExpertGovernor,
+    expand_router,
+    freeze_all_but_ffn,
+    predict_neurons,
+    support_pick_expert,
+    support_pick_expert_qa,
+    train_fact_expert,
+)
 from .llm_tasks import (
     LLM_TASK_NAMES,
+    fact_probe_questions,
+    fact_qa_pairs,
     generate_llm_task,
+    parse_fact,
     tokenize_pairs,
+    tokenize_qa,
     yes_no_token_ids,
 )
 from .metrics import compute_forgetting
@@ -96,8 +111,41 @@ class LiveSession:
             self.task_names = state.get("task_names", self.task_names)
             self.n_tasks = len(self.masks_per_expert)
             self.probe = state.get("probe", {})
+            # restore governors + HRM router for live mid-chat learning
+            self.governors: list[TinyPerExpertGovernor] = []
+            for gsd in state.get("governor_state", []):
+                gov = TinyPerExpertGovernor(hidden=12).to(device)
+                gov.load_state_dict(gsd)
+                gov.eval()
+                for p in gov.parameters():
+                    p.requires_grad_(False)
+                self.governors.append(gov)
+            self.router = HRMRouter(num_experts=self.n_tasks, hidden=16).to(device)
+            if "router_state" in state:
+                self.router.load_state_dict(state["router_state"])
+            self.router.eval()
+            for p in self.router.parameters():
+                p.requires_grad_(False)
+            # rebuild NeuronRegister occupancy from saved masks
+            inters = [m.numel() for m in self.masks_per_expert[0]]
+            self.register = NeuronRegister(inters, device=device)
+            for eid, layer_masks in enumerate(self.masks_per_expert):
+                name = self.task_names[eid] if eid < len(self.task_names) else f"expert_{eid}"
+                # mark occupied without re-carving (masks already fixed)
+                counts = []
+                for li, m in enumerate(layer_masks):
+                    m = m.to(device)
+                    self.register.occupied[li] |= m
+                    self.register.ownership[li][m] = eid
+                    counts.append(int(m.sum().item()))
+                self.register.allocations.append(
+                    {"task": name, "expert_id": eid, "counts": counts,
+                     "owned": int(sum(counts))}
+                )
+            self.fact_index: dict[str, int] = {}  # kind -> expert_id
             print(f"EvAGI loaded: {self.n_tasks} experts, "
-                  f"{sum(int(m.sum()) for m in self.masks_per_expert[0])}+ neurons/layer0")
+                  f"{sum(int(m.sum()) for m in self.masks_per_expert[0])}+ neurons/layer0, "
+                  f"gov={len(self.governors)} router_E={self.router.num_experts}")
         elif engine == "baseline":
             model_dir = results_dir / "final_model"
             if not model_dir.exists():
@@ -107,6 +155,10 @@ class LiveSession:
                 model_dir, dtype=torch.float32
             ).to(device)
             self.masks_per_expert = None
+            self.governors = []
+            self.router = None
+            self.register = None
+            self.fact_index = {}
             self.probe = {}
             print("Baseline full-FT model loaded (no expert masks)")
         else:
@@ -188,6 +240,164 @@ class LiveSession:
                 )
         text = self.tokenizer.decode(out[0][enc["input_ids"].shape[1]:], skip_special_tokens=True)
         return text.strip()
+
+    # -- mid-chat fact learning (full EvAGI stack) -------------------------
+    def live_learn_fact(self, fact: dict, cfg: dict | None = None) -> dict:
+        """Install a new fact mid-chat via Equation V2 + Register + Governor + HRM.
+
+        Returns log dict: k_pred, neurons, loss history, expert_id.
+        """
+        if self.masks_per_expert is None:
+            raise RuntimeError("baseline has no expert stack")
+        cfg = cfg or {
+            "batch_size": 8, "lr": 5e-4, "weight_decay": 0.01,
+            "gov_l1": 1e-4, "neuron_div": 8,
+        }
+        kind = fact["kind"]
+        value = fact["value"]
+        n_layers = len(self.layers)
+        neuron_div = int(cfg.get("neuron_div", 8))
+
+        # already have an expert for this fact kind? reuse it
+        if kind in self.fact_index:
+            eid = self.fact_index[kind]
+            print(f"  [live] reusing expert {eid} for {kind}")
+        else:
+            # 1) Equation V2 -> k_alloc -> neuron counts
+            k_pred, counts = predict_neurons(kind, n_layers, neuron_div=neuron_div)
+            # 2) Register carves disjoint free neurons
+            expert_id = len(self.masks_per_expert)
+            masks = self.register.allocate(kind, counts, expert_id=expert_id)
+            owned = int(sum(m.sum().item() for m in masks))
+            print(f"  [live] EquationV2 {kind}: k_pred={k_pred} -> neurons={counts} "
+                  f"(owned {owned}) pool {self.register.total_occupied()}/"
+                  f"{self.register.total_pool()}")
+
+            # 3) fresh TinyPerExpertGovernor for this expert
+            gov = TinyPerExpertGovernor(hidden=12).to(self.device)
+            # 4) grow HRM router output head
+            self.router = expand_router(self.router, expert_id + 1, self.device)
+            for p in self.router.parameters():
+                p.requires_grad_(True)  # allow live router step
+
+            self.masks_per_expert.append(masks)
+            self.governors.append(gov)
+            self.task_names.append(kind) if kind not in self.task_names else None
+            # track by index carefully — task_names is skills; facts use fact_index
+            self.fact_index[kind] = expert_id
+            eid = expert_id
+            print(f"  [live] allocated expert {eid} "
+                  f"(gov {sum(p.numel() for p in gov.parameters())} params, "
+                  f"router E={self.router.num_experts})")
+
+        # 5) unfreeze FFN, hard-mask train on fact QA
+        freeze_all_but_ffn(self.model, self.layers)
+        self.model.train()
+        for p in self.governors[eid].parameters():
+            p.requires_grad_(True)
+        for p in self.router.parameters():
+            p.requires_grad_(True)
+
+        qa = fact_qa_pairs(kind, value, n=int(cfg.get("train_n", 32)))
+        print(f"  [live] training expert {eid} on {len(qa)} QA pairs "
+              f"(lr={cfg.get('lr', 5e-4)})...")
+        result = train_fact_expert(
+            self.model, self.tokenizer, self.layers, qa,
+            self.masks_per_expert[eid], self.governors[eid], self.router,
+            router_expert_id=eid, cfg=cfg, device=self.device,
+            max_length=self.max_length,
+            epochs=int(cfg.get("live_epochs", 4)),
+            lr=float(cfg.get("lr", 5e-4)),
+        )
+
+        # 6) freeze again after install
+        for p in self.model.parameters():
+            p.requires_grad_(False)
+        for p in self.governors[eid].parameters():
+            p.requires_grad_(False)
+        for p in self.router.parameters():
+            p.requires_grad_(False)
+        self.model.eval()
+
+        # hold-out probes for this fact
+        probes = fact_probe_questions(kind, value)
+        recall = self.recall_fact(kind, value, probes, expert_id=eid)
+        print(f"  [live] recall check: {recall}")
+        return {
+            "kind": kind, "value": value, "expert_id": eid,
+            "k_pred": result.get("k_pred"), "train": result,
+            "recall": recall, "probes": len(probes),
+        }
+
+    @torch.no_grad()
+    def recall_fact(self, kind: str, value: str,
+                    probes: list[tuple[str, str]] | None = None,
+                    expert_id: int | None = None) -> dict:
+        """Score free-text recall of a fact under support-picked / given expert."""
+        if probes is None:
+            probes = fact_probe_questions(kind, value)
+
+        # Routing protocol: labeled support from THIS fact's distribution
+        # (same as yes/no skills — 32-shot style, no task_id into the model).
+        support = probes  # (prompt, correct answer) pairs
+        pick_eid, losses = support_pick_expert_qa(
+            self.model, self.layers, self.masks_per_expert,
+            self.tokenizer, support, self.device, self.max_length,
+        )
+        if expert_id is None:
+            expert_id = pick_eid
+        # if caller forces an expert, still log what support-pick chose
+        pick_for_log = pick_eid
+
+        # generation-based exact/soft match
+        hits = 0
+        gens = []
+        target = value.strip().lower()
+        for prompt, _ in probes:
+            gen = self.generate_free(prompt, expert_id=expert_id, max_new_tokens=12)
+            gens.append(gen)
+            g = gen.strip().strip(".").strip().lower()
+            if target in g or g in target or (len(g) >= 2 and target[:3] in g):
+                hits += 1
+        # also teacher-forced accuracy: argmax first answer token
+        enc = tokenize_qa(self.tokenizer, probes, max_length=self.max_length)
+        input_ids = enc["input_ids"].to(self.device)
+        attention = enc["attention_mask"].to(self.device)
+        labels = enc["labels"].to(self.device)
+        first = (labels != -100).float().argmax(dim=1)
+        b_idx = torch.arange(input_ids.size(0), device=self.device)
+        pred_pos = (first - 1).clamp(min=0).to(self.device)
+        with ExpertMaskContext(self.layers, self.masks_per_expert, [expert_id]):
+            out = self.model(input_ids=input_ids, attention_mask=attention)
+        # compare full answer string likelihood rank via exact token match at first answer tok
+        ans_tok = self.tokenizer(target if not target.startswith(" ") else target,
+                                 add_special_tokens=False)["input_ids"]
+        # decode top-1 continuation
+        top1 = out.logits[b_idx, pred_pos].argmax(dim=-1)
+        decoded = self.tokenizer.batch_decode(top1.unsqueeze(1), skip_special_tokens=True)
+        tf_hits = sum(
+            1 for d, (_, ans) in zip(decoded, probes)
+            if target in (d + ans).lower() or d.strip().lower() in target
+            or target.startswith(d.strip().lower().lstrip())
+        )
+        # simpler TF: token id of first answer token
+        first_ans_ids = []
+        for _, ans in probes:
+            ids = self.tokenizer(ans, add_special_tokens=False)["input_ids"]
+            first_ans_ids.append(ids[0] if ids else -1)
+        tf_tok = sum(1 for p, t in zip(top1.tolist(), first_ans_ids) if p == t)
+
+        return {
+            "expert": expert_id,
+            "support_pick": pick_for_log,
+            "support_nll": [round(x, 4) for x in losses],
+            "gen_hits": hits,
+            "gen_total": len(probes),
+            "gen_acc": round(100.0 * hits / max(len(probes), 1), 1),
+            "tf_first_tok": tf_tok,
+            "tf_total": len(probes),
+            "generations": gens[:3],
+        }
 
     # -- eval all skills (live, no task_id) --------------------------------
     @torch.no_grad()
@@ -385,8 +595,10 @@ def run_scripted(session: LiveSession, outdir: Path) -> None:
 def run_interactive(session: LiveSession, outdir: Path) -> None:
     print("\n" + "=" * 72)
     print(f"INTERACTIVE LIVE CHAT — engine={session.engine}")
-    print("  type a yes/no question ending with 'Answer:' or free text")
-    print("  commands: /eval  /metrics  /quit")
+    print("  Teach:  My name is Rehan / My favorite color is emerald")
+    print("  Ask:    What is your name? / skill Qs ending 'Answer:'")
+    print("  Commands: /eval  /metrics  /facts  /quit")
+    print("  Facts trigger LIVE weight updates (V2+Register+Governor+HRM)")
     print("=" * 72)
     acc0 = session.eval_step("t0")
     session.record_turn({"turn": 0, "kind": "init", "user": "", "assistant": ""}, acc0)
@@ -411,37 +623,68 @@ def run_interactive(session: LiveSession, outdir: Path) -> None:
         if user == "/metrics":
             session.print_metrics()
             continue
+        if user == "/facts":
+            print(f"  fact_index={getattr(session, 'fact_index', {})}")
+            print(f"  experts={len(session.masks_per_expert or [])}")
+            continue
 
         turn += 1
-        is_skill = user.rstrip().endswith("Answer:") or user.rstrip().endswith("Answer")
-        meta: dict = {"turn": turn, "kind": "skill" if is_skill else "free",
-                      "user": user}
-        if is_skill and session.masks_per_expert is not None:
-            # route with union of all support banks: pick expert that minimizes
-            # mean NLL across every skill's support (fully task-agnostic),
-            # then answer. For clearer skill isolation demo, prefer matching
-            # skill if prompt content maps — but routing itself stays g(x).
-            # Protocol A (default): per-skill support not available without
-            # knowing skill; use combined support from all banks.
-            combined = []
-            for i in range(session.n_tasks):
-                combined.extend(session.support_sets[i][:8])  # 8x5=40 shots
-            eid, losses = session.pick_expert(combined)
-            ans = session.answer_yes_no(user, expert_id=eid)
-            print(f"  router: expert={eid}")
-            print(f"  bot> {ans['answer']} (p_yes={ans['p_yes']:.3f})")
-            meta.update({"expert": eid, "answer": ans["answer"],
-                         "p_yes": ans["p_yes"]})
-        else:
-            eid = (turn - 1) % max(session.n_tasks, 1) if session.masks_per_expert else -1
-            if is_skill:
+        meta: dict = {"turn": turn, "user": user}
+
+        # 1) fact declaration -> live learn
+        fact = parse_fact(user)
+        if fact and session.masks_per_expert is not None:
+            print(f"  [parsed fact] {fact['kind']} = {fact['value']}")
+            print("  [LIVE LEARN — weights updating mid-chat]")
+            result = session.live_learn_fact(fact, cfg=LEARN_CFG)
+            meta.update({"kind": "teach", "fact": {k: result[k] for k in
+                          ("kind", "value", "expert_id", "recall")}})
+            r = result["recall"]
+            print(f"  bot> learned. recall gen_acc={r['gen_acc']}% "
+                  f"expert={r['expert']} loss={result['train']['final_loss']:.4f}")
+            if r.get("generations"):
+                print(f"  bot> sample: {r['generations'][0]}")
+        # 2) open question about a known fact
+        elif any(q in user.lower() for q in (
+            "your name", "my name", "favorite color", "favorite color",
+            "favorite colour", "what city", "where do you live", "favorite food",
+        )) and session.masks_per_expert is not None:
+            prompt = user if user.rstrip().endswith(("A:", "Answer:")) else user.rstrip() + " A:"
+            probes = [(prompt, " x")]
+            eid, losses = support_pick_expert_qa(
+                session.model, session.layers, session.masks_per_expert,
+                session.tokenizer, probes, session.device, session.max_length,
+            )
+            gen = session.generate_free(prompt, expert_id=eid, max_new_tokens=12)
+            print(f"  router: expert={eid} nll={[round(x,3) for x in losses]}")
+            print(f"  bot> {gen}")
+            meta.update({"kind": "ask_fact", "expert": eid, "generation": gen,
+                         "prompt": prompt})
+        # 3) yes/no skill
+        elif user.rstrip().endswith("Answer:") or user.rstrip().endswith("Answer"):
+            is_skill = True
+            if session.masks_per_expert is not None:
+                combined = []
+                for i in range(min(session.n_tasks, len(session.support_sets))):
+                    combined.extend(session.support_sets[i][:8])
+                eid, losses = session.pick_expert(combined) if combined else (-1, [])
+                ans = session.answer_yes_no(user, expert_id=eid)
+                print(f"  router: expert={eid}")
+                print(f"  bot> {ans['answer']} (p_yes={ans['p_yes']:.3f})")
+                meta.update({"kind": "skill", "expert": eid, "answer": ans["answer"],
+                             "p_yes": ans["p_yes"]})
+            else:
                 ans = session.answer_yes_no(user, expert_id=-1)
                 print(f"  bot> {ans['answer']} (p_yes={ans['p_yes']:.3f})")
-                meta.update({"answer": ans["answer"], "p_yes": ans["p_yes"]})
-            else:
-                text = session.generate_free(user, expert_id=eid)
-                print(f"  bot> {text}")
-                meta.update({"expert": eid, "generation": text})
+                meta.update({"kind": "skill", "answer": ans["answer"],
+                             "p_yes": ans["p_yes"]})
+        else:
+            eid = (turn - 1) % max(len(session.masks_per_expert or []) or 1, 1)
+            if session.masks_per_expert is None:
+                eid = -1
+            text = session.generate_free(user, expert_id=eid)
+            print(f"  bot> {text}")
+            meta.update({"kind": "free", "expert": eid, "generation": text})
 
         accs = session.eval_step(f"t{turn}")
         session.record_turn(meta, accs)
@@ -457,14 +700,16 @@ def run_interactive(session: LiveSession, outdir: Path) -> None:
             "turns": session.turn_log,
             "accuracy_matrix": session.matrix,
             "live_metrics": final,
-        }, f, indent=2)
+            "fact_index": session.fact_index,
+        }, f, indent=2, default=str)
     print(f"Wrote {outdir / f'live_session_{session.engine}.json'}")
 
 
 def main():
     parser = argparse.ArgumentParser(description="Live multi-turn EvAGI LLM inference")
     parser.add_argument("--engine", choices=["evagi", "baseline"], default="evagi")
-    parser.add_argument("--mode", choices=["scripted", "interactive"], default="scripted")
+    parser.add_argument("--mode", choices=["scripted", "interactive", "learn"],
+                        default="scripted")
     parser.add_argument("--results", default=None,
                         help="results dir (default results_llm_<engine>)")
     parser.add_argument("--outdir", default=str(PROJECT_ROOT / "results_llm_live"))
@@ -489,8 +734,179 @@ def main():
 
     if args.mode == "scripted":
         run_scripted(session, outdir)
+    elif args.mode == "learn":
+        run_learn(session, outdir)
     else:
         run_interactive(session, outdir)
+
+
+LEARN_CFG = {
+    "batch_size": 8,
+    "lr": 8e-4,
+    "weight_decay": 0.01,
+    "gov_l1": 1e-4,
+    "neuron_div": 8,
+    "live_epochs": 6,
+    "train_n": 48,
+}
+
+
+def _ask_name(session: LiveSession, prompt: str, label: str | None = None,
+              fact_kind: str | None = None) -> dict:
+    """Open-ended question: support-route among ALL experts, generate.
+
+    When `label` is known, support = held-out probes for that fact with
+    correct answers (same 32-shot protocol as yes/no skills — no task_id).
+    When unknown (pre-learn), support is a dummy and routing is expected
+    to miss — that's the BEFORE baseline.
+    """
+    if label is not None and fact_kind is not None:
+        support = fact_probe_questions(fact_kind, label)
+    elif label is not None:
+        # minimal support: one correct QA for the expected answer family
+        support = [(prompt, f" {label}")]
+    else:
+        support = [(prompt, " x")]
+
+    if session.masks_per_expert is not None:
+        eid, losses = support_pick_expert_qa(
+            session.model, session.layers, session.masks_per_expert,
+            session.tokenizer, support, session.device, session.max_length,
+        )
+        gen = session.generate_free(prompt, expert_id=eid, max_new_tokens=10)
+        print(f"  router: expert={eid}  support_nll={[round(x,3) for x in losses]}")
+    else:
+        eid = -1
+        losses = []
+        gen = session.generate_free(prompt, expert_id=-1, max_new_tokens=10)
+    print(f"  user: {prompt}")
+    print(f"  assistant: {gen}")
+    hit = None
+    if label is not None:
+        g = gen.strip().lower()
+        t = label.strip().lower()
+        hit = int(t in g or (len(g) >= 2 and t[:3] in g))
+        print(f"  check: want '{label}'  [{'OK' if hit else 'MISS'}]")
+    return {"prompt": prompt, "generation": gen, "expert": eid,
+            "support_nll": [round(x, 4) for x in losses], "hit": hit}
+
+
+def run_learn(session: LiveSession, outdir: Path) -> None:
+    """Mid-chat learning: say a fact -> EvAGI installs expert live -> recall."""
+    if session.masks_per_expert is None:
+        raise SystemExit("--mode learn requires --engine evagi")
+
+    print("\n" + "=" * 72)
+    print("LIVE LEARNING SESSION — teach facts mid-chat (full EvAGI stack)")
+    print("  EquationV2 -> Register -> TinyPerExpertGovernor -> hard mask -> HRM")
+    print("=" * 72)
+
+    log: dict = {"engine": session.engine, "events": [], "facts": []}
+
+    # -- t0: baseline skills + open recall BEFORE learning ----------------
+    print("\n[turn 0 — pre-learn skill eval]")
+    acc0 = session.eval_step("t0")
+    session.record_turn({"turn": 0, "kind": "init"}, acc0)
+    session.print_metrics()
+
+    print("\n[turn 1 — ask name BEFORE learning]")
+    before = _ask_name(session, "Q: What is your name? A:", label=None)
+    log["events"].append({"turn": 1, "kind": "ask_before", **before})
+
+    # -- t2: USER teaches name -> LIVE LEARN --------------------------------
+    print("\n[turn 2 — user teaches name → LIVE WEIGHT UPDATE]")
+    fact_utter = "My name is Rehan"
+    print(f"  user: {fact_utter}")
+    fact = parse_fact(fact_utter)
+    assert fact and fact["kind"] == "fact_name", fact
+    learn1 = session.live_learn_fact(fact, cfg=LEARN_CFG)
+    log["facts"].append(learn1)
+    log["events"].append({"turn": 2, "kind": "teach", "utterance": fact_utter,
+                          "fact": {k: learn1[k] for k in
+                                   ("kind", "value", "expert_id", "recall")}})
+
+    # skills after live install (isolation check)
+    print("\n  [skills immediately after live learn]")
+    acc1 = session.eval_step("post_name")
+    session.record_turn({"turn": 2, "kind": "learn", "user": fact_utter,
+                         "assistant": "(installed)"}, acc1)
+    session.print_metrics()
+
+    # -- t3: ask name AFTER learning ---------------------------------------
+    print("\n[turn 3 — ask name AFTER learning]")
+    after = _ask_name(session, "Q: What is your name? A:", label="Rehan",
+                      fact_kind="fact_name")
+    # also held-out probe style
+    probes = fact_probe_questions("fact_name", "Rehan")
+    rec = session.recall_fact("fact_name", "Rehan", probes)
+    print(f"  recall metrics: gen {rec['gen_acc']}% "
+          f"tf_tok {rec['tf_first_tok']}/{rec['tf_total']} "
+          f"expert={rec['expert']} support_pick={rec.get('support_pick')}")
+    if rec.get("generations"):
+        print(f"  sample gens: {rec['generations']}")
+    log["events"].append({"turn": 3, "kind": "ask_after", **after, "recall": rec})
+
+    # -- t4: teach a second fact (color) -----------------------------------
+    print("\n[turn 4 — user teaches color → LIVE WEIGHT UPDATE]")
+    fact2_utter = "My favorite color is emerald"
+    print(f"  user: {fact2_utter}")
+    fact2 = parse_fact(fact2_utter)
+    assert fact2, fact2
+    learn2 = session.live_learn_fact(fact2, cfg=LEARN_CFG)
+    log["facts"].append(learn2)
+    log["events"].append({"turn": 4, "kind": "teach", "utterance": fact2_utter,
+                          "fact": {k: learn2[k] for k in
+                                   ("kind", "value", "expert_id", "recall")}})
+
+    print("\n  [skills after second live learn]")
+    acc2 = session.eval_step("post_color")
+    session.record_turn({"turn": 4, "kind": "learn", "user": fact2_utter,
+                         "assistant": "(installed)"}, acc2)
+    session.print_metrics()
+
+    # -- t5: recall both facts + name again (stability) ---------------------
+    print("\n[turn 5 — recall name (stability) + color]")
+    again = _ask_name(session, "Q: What is your name? A:", label="Rehan",
+                      fact_kind="fact_name")
+    color_q = _ask_name(session, "Q: What is your favorite color? A:",
+                        label="emerald", fact_kind="fact_color")
+    log["events"].append({"turn": 5, "kind": "recall_both",
+                          "name": again, "color": color_q})
+
+    # final skill eval
+    print("\n[final skill eval after all live learning]")
+    accf = session.eval_step("final")
+    session.record_turn({"turn": 6, "kind": "final"}, accf)
+    final_m = session.print_metrics()
+
+    # summary
+    name_ok = bool(after.get("hit")) and bool(again.get("hit"))
+    color_ok = bool(color_q.get("hit"))
+    print("\n" + "=" * 72)
+    print("LIVE LEARNING DONE")
+    print(f"  facts installed: {len(log['facts'])}")
+    for f in log["facts"]:
+        r = f["recall"]
+        print(f"    {f['kind']}='{f['value']}' expert={f['expert_id']} "
+              f"train_loss={f['train']['final_loss']:.4f} "
+              f"gen_acc={r['gen_acc']}%")
+    print(f"  name recall after teach: {'YES' if name_ok else 'NO'}")
+    print(f"  color recall after teach: {'YES' if color_ok else 'NO'}")
+    print(f"  old skills avg forgetting during live learns: "
+          f"{final_m['average_forgetting']:.2f}%")
+    print(f"  old skills final avg: {final_m['final_average_accuracy']:.2f}%")
+    print("=" * 72)
+
+    log["live_metrics"] = final_m
+    log["name_recall_ok"] = name_ok
+    log["color_recall_ok"] = color_ok
+    log["accuracy_matrix"] = session.matrix
+    log["turns"] = session.turn_log
+    outdir.mkdir(parents=True, exist_ok=True)
+    path = outdir / "live_learn_evagi.json"
+    with open(path, "w") as fh:
+        json.dump(log, fh, indent=2, default=str)
+    print(f"Wrote {path}")
 
 
 if __name__ == "__main__":

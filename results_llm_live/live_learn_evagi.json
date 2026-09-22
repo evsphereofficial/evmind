@@ -1,0 +1,399 @@
+{
+  "engine": "evagi",
+  "events": [
+    {
+      "turn": 1,
+      "kind": "ask_before",
+      "prompt": "Q: What is your name? A:",
+      "generation": "a!!!!!!!!!",
+      "expert": 0,
+      "support_nll": [
+        2.2827,
+        5.602,
+        8.9694,
+        6.0276,
+        5.2514
+      ],
+      "hit": null
+    },
+    {
+      "turn": 2,
+      "kind": "teach",
+      "utterance": "My name is Rehan",
+      "fact": {
+        "kind": "fact_name",
+        "value": "Rehan",
+        "expert_id": 5,
+        "recall": {
+          "expert": 5,
+          "support_pick": 5,
+          "support_nll": [
+            4.3531,
+            6.4806,
+            9.0442,
+            7.4535,
+            7.0272,
+            0.0004
+          ],
+          "gen_hits": 3,
+          "gen_total": 3,
+          "gen_acc": 100.0,
+          "tf_first_tok": 3,
+          "tf_total": 3,
+          "generations": [
+            "Rehan",
+            "Rehan",
+            "Rehan"
+          ]
+        }
+      }
+    },
+    {
+      "turn": 3,
+      "kind": "ask_after",
+      "prompt": "Q: What is your name? A:",
+      "generation": "Rehan",
+      "expert": 5,
+      "support_nll": [
+        4.3531,
+        6.4806,
+        9.0442,
+        7.4535,
+        7.0272,
+        0.0004
+      ],
+      "hit": 1,
+      "recall": {
+        "expert": 5,
+        "support_pick": 5,
+        "support_nll": [
+          4.3531,
+          6.4806,
+          9.0442,
+          7.4535,
+          7.0272,
+          0.0004
+        ],
+        "gen_hits": 3,
+        "gen_total": 3,
+        "gen_acc": 100.0,
+        "tf_first_tok": 3,
+        "tf_total": 3,
+        "generations": [
+          "Rehan",
+          "Rehan",
+          "Rehan"
+        ]
+      }
+    },
+    {
+      "turn": 4,
+      "kind": "teach",
+      "utterance": "My favorite color is emerald",
+      "fact": {
+        "kind": "fact_color",
+        "value": "emerald",
+        "expert_id": 6,
+        "recall": {
+          "expert": 6,
+          "support_pick": 6,
+          "support_nll": [
+            4.782,
+            5.4672,
+            9.6743,
+            6.9554,
+            5.8477,
+            4.8981,
+            0.023
+          ],
+          "gen_hits": 2,
+          "gen_total": 2,
+          "gen_acc": 100.0,
+          "tf_first_tok": 2,
+          "tf_total": 2,
+          "generations": [
+            "emerald",
+            "emerald"
+          ]
+        }
+      }
+    },
+    {
+      "turn": 5,
+      "kind": "recall_both",
+      "name": {
+        "prompt": "Q: What is your name? A:",
+        "generation": "Rehan",
+        "expert": 5,
+        "support_nll": [
+          4.3546,
+          6.4836,
+          9.0461,
+          7.4564,
+          7.0301,
+          0.0004,
+          5.9942
+        ],
+        "hit": 1
+      },
+      "color": {
+        "prompt": "Q: What is your favorite color? A:",
+        "generation": "emerald",
+        "expert": 6,
+        "support_nll": [
+          4.782,
+          5.4672,
+          9.6743,
+          6.9554,
+          5.8477,
+          4.8981,
+          0.023
+        ],
+        "hit": 1
+      }
+    }
+  ],
+  "facts": [
+    {
+      "kind": "fact_name",
+      "value": "Rehan",
+      "expert_id": 5,
+      "k_pred": null,
+      "train": {
+        "history": [
+          {
+            "epoch": 1,
+            "loss": 8.91710114479065,
+            "router_loss": 1.878010670344035
+          },
+          {
+            "epoch": 2,
+            "loss": 2.0241982142130532,
+            "router_loss": 1.8607190251350403
+          },
+          {
+            "epoch": 3,
+            "loss": 0.5716930205623308,
+            "router_loss": 1.853109359741211
+          },
+          {
+            "epoch": 4,
+            "loss": 0.039582402484181024,
+            "router_loss": 1.8396279613176982
+          },
+          {
+            "epoch": 5,
+            "loss": 0.0006082388523888463,
+            "router_loss": 1.812296986579895
+          },
+          {
+            "epoch": 6,
+            "loss": 0.00030361907556653023,
+            "router_loss": 1.7862067421277363
+          }
+        ],
+        "final_loss": 0.00030361907556653023
+      },
+      "recall": {
+        "expert": 5,
+        "support_pick": 5,
+        "support_nll": [
+          4.3531,
+          6.4806,
+          9.0442,
+          7.4535,
+          7.0272,
+          0.0004
+        ],
+        "gen_hits": 3,
+        "gen_total": 3,
+        "gen_acc": 100.0,
+        "tf_first_tok": 3,
+        "tf_total": 3,
+        "generations": [
+          "Rehan",
+          "Rehan",
+          "Rehan"
+        ]
+      },
+      "probes": 3
+    },
+    {
+      "kind": "fact_color",
+      "value": "emerald",
+      "expert_id": 6,
+      "k_pred": null,
+      "train": {
+        "history": [
+          {
+            "epoch": 1,
+            "loss": 8.330976525942484,
+            "router_loss": 2.100139578183492
+          },
+          {
+            "epoch": 2,
+            "loss": 1.6878618001937866,
+            "router_loss": 2.0714638233184814
+          },
+          {
+            "epoch": 3,
+            "loss": 0.3901965022087097,
+            "router_loss": 2.0506874322891235
+          },
+          {
+            "epoch": 4,
+            "loss": 0.049572364737590156,
+            "router_loss": 2.0283960501352944
+          },
+          {
+            "epoch": 5,
+            "loss": 0.0039144668747515725,
+            "router_loss": 2.0015094876289368
+          },
+          {
+            "epoch": 6,
+            "loss": 0.0006630499289409878,
+            "router_loss": 1.9730517466862996
+          }
+        ],
+        "final_loss": 0.0006630499289409878
+      },
+      "recall": {
+        "expert": 6,
+        "support_pick": 6,
+        "support_nll": [
+          4.782,
+          5.4672,
+          9.6743,
+          6.9554,
+          5.8477,
+          4.8981,
+          0.023
+        ],
+        "gen_hits": 2,
+        "gen_total": 2,
+        "gen_acc": 100.0,
+        "tf_first_tok": 2,
+        "tf_total": 2,
+        "generations": [
+          "emerald",
+          "emerald"
+        ]
+      },
+      "probes": 2
+    }
+  ],
+  "live_metrics": {
+    "average_forgetting": 0.0,
+    "final_average_accuracy": 100.0,
+    "per_task": {
+      "sentiment": {
+        "best": 100.0,
+        "final": 100.0,
+        "forgetting": 0.0
+      },
+      "spelling": {
+        "best": 100.0,
+        "final": 100.0,
+        "forgetting": 0.0
+      },
+      "capital": {
+        "best": 100.0,
+        "final": 100.0,
+        "forgetting": 0.0
+      },
+      "plural": {
+        "best": 100.0,
+        "final": 100.0,
+        "forgetting": 0.0
+      },
+      "antonym": {
+        "best": 100.0,
+        "final": 100.0,
+        "forgetting": 0.0
+      }
+    }
+  },
+  "name_recall_ok": true,
+  "color_recall_ok": true,
+  "accuracy_matrix": [
+    [
+      100.0,
+      100.0,
+      100.0,
+      100.0,
+      100.0
+    ],
+    [
+      100.0,
+      100.0,
+      100.0,
+      100.0,
+      100.0
+    ],
+    [
+      100.0,
+      100.0,
+      100.0,
+      100.0,
+      100.0
+    ],
+    [
+      100.0,
+      100.0,
+      100.0,
+      100.0,
+      100.0
+    ]
+  ],
+  "turns": [
+    {
+      "turn": 0,
+      "kind": "init",
+      "accuracies": {
+        "sentiment": 100.0,
+        "spelling": 100.0,
+        "capital": 100.0,
+        "plural": 100.0,
+        "antonym": 100.0
+      }
+    },
+    {
+      "turn": 2,
+      "kind": "learn",
+      "user": "My name is Rehan",
+      "assistant": "(installed)",
+      "accuracies": {
+        "sentiment": 100.0,
+        "spelling": 100.0,
+        "capital": 100.0,
+        "plural": 100.0,
+        "antonym": 100.0
+      }
+    },
+    {
+      "turn": 4,
+      "kind": "learn",
+      "user": "My favorite color is emerald",
+      "assistant": "(installed)",
+      "accuracies": {
+        "sentiment": 100.0,
+        "spelling": 100.0,
+        "capital": 100.0,
+        "plural": 100.0,
+        "antonym": 100.0
+      }
+    },
+    {
+      "turn": 6,
+      "kind": "final",
+      "accuracies": {
+        "sentiment": 100.0,
+        "spelling": 100.0,
+        "capital": 100.0,
+        "plural": 100.0,
+        "antonym": 100.0
+      }
+    }
+  ]
+}
