@@ -299,12 +299,7 @@ def main():
     fact_meta = {}
 
     if CHECKPOINT.exists():
-        model_dir = SAVE_DIR / "model"
-        if model_dir.exists():
-            trained = AutoModelForCausalLM.from_pretrained(model_dir, dtype=torch.float32)
-            model.load_state_dict(trained.state_dict())
-            del trained
-            print(f"  Loaded trained model")
+        # Always load fresh base model (never save trained weights)
         ov = torch.load(CHECKPOINT, map_location=device, weights_only=False)
         for em in ov["masks"]:
             masks_per_expert.append([m.to(device) if isinstance(m, torch.Tensor)
@@ -321,8 +316,7 @@ def main():
         print(f"  Loaded: {len(fact_index)} facts, {register.used:,}/{register.pool:,} weights")
 
     def save_checkpoint():
-        model.save_pretrained(SAVE_DIR / "model")
-        tokenizer.save_pretrained(SAVE_DIR / "model")
+        # Only save masks + facts (never save trained model weights)
         torch.save({
             "masks": [[m.cpu() for m in e] for e in masks_per_expert],
             "fact_index": fact_index,
@@ -331,7 +325,7 @@ def main():
             "fact_meta": fact_meta,
             "weights_used": register.used,
         }, CHECKPOINT)
-        print(f"  Saved: {SAVE_DIR}")
+        print(f"  Saved: {CHECKPOINT}")
 
     print("Ready.\n")
 
