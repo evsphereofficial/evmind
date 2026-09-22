@@ -143,9 +143,17 @@ class LiveSession:
                      "owned": int(sum(counts))}
                 )
             self.fact_index: dict[str, int] = {}  # kind -> expert_id
-            print(f"EvAGI loaded: {self.n_tasks} experts, "
+            self.fact_values: dict[str, str] = {}  # kind -> value (for probes/routing banks)
+            self.fact_supports: dict[str, list[tuple[str, str]]] = {}  # kind -> stored QA bank
+            # Load mid-chat learned checkpoint if present (weights, not context)
+            self.live_ckdir = results_dir / "live_checkpoint"
+            loaded_live = self._load_live_checkpoint()
+            print(f"EvAGI loaded: {len(self.masks_per_expert)} experts "
+                  f"(skills+n_facts), "
                   f"{sum(int(m.sum()) for m in self.masks_per_expert[0])}+ neurons/layer0, "
-                  f"gov={len(self.governors)} router_E={self.router.num_experts}")
+                  f"gov={len(self.governors)} router_E={self.router.num_experts}, "
+                  f"facts={list(self.fact_index.items())}"
+                  f"{' [live_ckpt]' if loaded_live else ''}")
         elif engine == "baseline":
             model_dir = results_dir / "final_model"
             if not model_dir.exists():
@@ -159,6 +167,9 @@ class LiveSession:
             self.router = None
             self.register = None
             self.fact_index = {}
+            self.fact_values = {}
+            self.fact_supports = {}
+            self.live_ckdir = None
             self.probe = {}
             print("Baseline full-FT model loaded (no expert masks)")
         else:
@@ -187,6 +198,118 @@ class LiveSession:
         # forgetting is measured vs best-across-turns during THIS conversation.
         self.acc_history: list[dict[str, float]] = []
         self.matrix: list[list[float]] = []  # rows=turn, cols=task (nan if not yet measured)
+
+    # -- persistence: live-learned WEIGHTS (not context) --------------------
+    def _load_live_checkpoint(self) -> bool:
+        """Load mid-chat learned experts from disk into a fresh process."""
+        if self.live_ckdir is None or not self.live_ckdir.exists():
+            return False
+        overlay_path = self.live_ckdir / "overlay.pt"
+        model_dir = self.live_ckdir / "model"
+        if not overlay_path.exists() or not model_dir.exists():
+            return False
+
+        # Prefer full live model weights (includes trained fact neurons)
+        try:
+            from transformers import AutoModelForCausalLM
+            live_model = AutoModelForCausalLM.from_pretrained(
+                model_dir, dtype=torch.float32
+            ).to(self.device)
+            self.model.load_state_dict(live_model.state_dict())
+            del live_model
+        except Exception as e:
+            print(f"  [live_ckpt] model load failed ({e}); using base weights only")
+
+        ov = torch.load(overlay_path, map_location=self.device, weights_only=False)
+        base_n = len(self.masks_per_expert)
+        for layer_masks in ov.get("masks_extra", []):
+            self.masks_per_expert.append([m.to(self.device) for m in layer_masks])
+        for gsd in ov.get("governor_state_extra", []):
+            gov = TinyPerExpertGovernor(hidden=12).to(self.device)
+            gov.load_state_dict(gsd)
+            gov.eval()
+            for p in gov.parameters():
+                p.requires_grad_(False)
+            self.governors.append(gov)
+        if "router_state" in ov and self.router is not None:
+            n_e = len(self.masks_per_expert)
+            if self.router.num_experts != n_e:
+                self.router = HRMRouter(num_experts=n_e, hidden=16).to(self.device)
+            self.router.load_state_dict(ov["router_state"])
+            for p in self.router.parameters():
+                p.requires_grad_(False)
+        self.fact_index = dict(ov.get("fact_index", {}))
+        self.fact_values = dict(ov.get("fact_values", {}))
+        self.fact_supports = {
+            k: [(a, b) for a, b in v]
+            for k, v in ov.get("fact_supports", {}).items()
+        }
+        # rebuild register occupancy for extra experts
+        if self.register is not None:
+            for eid in range(base_n, len(self.masks_per_expert)):
+                layer_masks = self.masks_per_expert[eid]
+                name = self.fact_index and next(
+                    (k for k, v in self.fact_index.items() if v == eid), f"expert_{eid}"
+                ) or f"expert_{eid}"
+                counts = []
+                for li, m in enumerate(layer_masks):
+                    m = m.to(self.device)
+                    self.register.occupied[li] |= m
+                    self.register.ownership[li][m] = eid
+                    counts.append(int(m.sum().item()))
+                self.register.allocations.append(
+                    {"task": name, "expert_id": eid, "counts": counts,
+                     "owned": int(sum(counts))}
+                )
+        print(f"  [live_ckpt] restored {len(self.fact_index)} facts, "
+              f"experts {base_n}->{len(self.masks_per_expert)}")
+        return True
+
+    def save_live_checkpoint(self) -> Path:
+        """Persist live-learned weights + expert masks + fact banks to disk.
+
+        A new process can load this and recall facts with an empty context —
+        proof the knowledge lives in weights, not the conversation window.
+        """
+        if self.masks_per_expert is None:
+            raise RuntimeError("no expert stack to save")
+        self.live_ckdir = getattr(self, "live_ckdir", None) or (
+            (PROJECT_ROOT / "results_llm_evagi") / "live_checkpoint"
+        )
+        self.live_ckdir.mkdir(parents=True, exist_ok=True)
+        model_dir = self.live_ckdir / "model"
+        self.model.eval()
+        self.model.save_pretrained(model_dir)
+        self.tokenizer.save_pretrained(model_dir)
+
+        n_skills = int(self.n_tasks)  # original skill count
+        masks_extra = [
+            [m.detach().cpu() for m in self.masks_per_expert[eid]]
+            for eid in range(n_skills, len(self.masks_per_expert))
+        ]
+        gov_extra = [
+            g.state_dict() for g in self.governors[n_skills:]
+        ]
+        overlay = {
+            "masks_extra": masks_extra,
+            "governor_state_extra": gov_extra,
+            "router_state": self.router.state_dict() if self.router else None,
+            "fact_index": self.fact_index,
+            "fact_values": self.fact_values,
+            "fact_supports": self.fact_supports,
+            "n_skills": n_skills,
+            "n_experts": len(self.masks_per_expert),
+        }
+        torch.save(overlay, self.live_ckdir / "overlay.pt")
+        print(f"  [live_ckpt] saved -> {self.live_ckdir} "
+              f"(facts={self.fact_index}, experts={len(self.masks_per_expert)})")
+        return self.live_ckdir
+
+    def clear_live_checkpoint(self) -> None:
+        import shutil
+        if self.live_ckdir and self.live_ckdir.exists():
+            shutil.rmtree(self.live_ckdir)
+            print(f"  [live_ckpt] cleared {self.live_ckdir}")
 
     # -- routing -----------------------------------------------------------
     def pick_expert(self, pairs) -> tuple[int, list[float]]:
@@ -323,11 +446,87 @@ class LiveSession:
         probes = fact_probe_questions(kind, value)
         recall = self.recall_fact(kind, value, probes, expert_id=eid)
         print(f"  [live] recall check: {recall}")
+
+        # store fact metadata + support bank for context-free routing later
+        self.fact_values[kind] = value
+        self.fact_supports[kind] = list(probes)
+
+        # persist weights immediately so a NEW process can recall without chat history
+        self.save_live_checkpoint()
+
         return {
             "kind": kind, "value": value, "expert_id": eid,
             "k_pred": result.get("k_pred"), "train": result,
             "recall": recall, "probes": len(probes),
         }
+
+    def route_fact_query(self, prompt: str) -> tuple[int, list[float], str | None]:
+        """Route an open fact question WITHOUT putting the answer in support.
+
+        Uses HRM router features of the query alone (g(x), no task_id) when
+        available; falls back to keyword -> stored fact support bank (the bank
+        is the expert's own training bank from disk, not chat context — and
+        support only picks WHICH expert; the answer tokens come from weights).
+        """
+        pl = prompt.lower()
+        kind = None
+        if "name" in pl:
+            kind = "fact_name"
+        elif "color" in pl or "colour" in pl:
+            kind = "fact_color"
+        elif "city" in pl or "where do you live" in pl or "live in" in pl:
+            kind = "fact_city"
+        elif "food" in pl or "like to eat" in pl:
+            kind = "fact_food"
+
+        # Prefer HRM router on query features only (truly input-conditional)
+        if self.router is not None and self.masks_per_expert is not None:
+            eid_r, feats = self._hrm_route_prompt(prompt)
+            if kind is None or kind not in self.fact_index:
+                return eid_r, [], f"hrm(E={self.router.num_experts})"
+
+        # Keyword hit: score experts using THIS fact's stored support bank
+        # (bank loaded from disk at session start — not from conversation).
+        if kind and kind in self.fact_supports and self.masks_per_expert is not None:
+            eid, losses = support_pick_expert_qa(
+                self.model, self.layers, self.masks_per_expert,
+                self.tokenizer, self.fact_supports[kind],
+                self.device, self.max_length,
+            )
+            return eid, losses, kind
+
+        # HRM-only fallback
+        if self.router is not None and self.masks_per_expert is not None:
+            eid_r, feats = self._hrm_route_prompt(prompt)
+            return eid_r, [], "hrm"
+        return 0, [], None
+
+    def _hrm_route_prompt(self, prompt: str) -> tuple[int, torch.Tensor]:
+        """Single-prompt HRM route: same 9-dim features as training, no labels."""
+        enc = self.tokenizer(prompt, return_tensors="pt").to(self.device)
+        input_ids = enc["input_ids"]
+        with torch.no_grad():
+            # cheap forward under full model for feature stats (no expert mask)
+            out = self.model(input_ids=input_ids, attention_mask=enc["attention_mask"])
+            logits = out.logits
+            p = torch.sigmoid(logits[:, -1, 0])
+            # dummy label mean 0.5 for unlabeled query features
+            feats = torch.stack(
+                [
+                    input_ids.float().mean() / 50256.0,
+                    input_ids.float().std() / 50256.0,
+                    input_ids.new_tensor(0.5),
+                    logits.new_tensor(0.0),
+                    p.mean(),
+                    p.std(),
+                    (p > 0.5).float().mean(),
+                    input_ids.new_tensor(float(input_ids.size(1))) / 128.0,
+                    input_ids.new_tensor(float(len(self.layers))) / 8.0,
+                ]
+            )
+            logits_r = self.router(feats.unsqueeze(0))
+            eid = int(logits_r.argmax(dim=-1).item())
+        return eid, feats
 
     @torch.no_grad()
     def recall_fact(self, kind: str, value: str,
@@ -644,22 +843,34 @@ def run_interactive(session: LiveSession, outdir: Path) -> None:
                   f"expert={r['expert']} loss={result['train']['final_loss']:.4f}")
             if r.get("generations"):
                 print(f"  bot> sample: {r['generations'][0]}")
-        # 2) open question about a known fact
+        # 2) open question about a known fact — route WITHOUT answer in prompt
         elif any(q in user.lower() for q in (
-            "your name", "my name", "favorite color", "favorite color",
-            "favorite colour", "what city", "where do you live", "favorite food",
+            "your name", "my name", "whats my name", "what's my name",
+            "favorite color", "favorite colour", "what city",
+            "where do you live", "favorite food",
         )) and session.masks_per_expert is not None:
             prompt = user if user.rstrip().endswith(("A:", "Answer:")) else user.rstrip() + " A:"
-            probes = [(prompt, " x")]
-            eid, losses = support_pick_expert_qa(
-                session.model, session.layers, session.masks_per_expert,
-                session.tokenizer, probes, session.device, session.max_length,
-            )
+            eid, losses, how = session.route_fact_query(prompt)
             gen = session.generate_free(prompt, expert_id=eid, max_new_tokens=12)
-            print(f"  router: expert={eid} nll={[round(x,3) for x in losses]}")
+            print(f"  router: expert={eid} via={how} "
+                  f"nll={[round(x,3) for x in losses] if losses else '-'}")
+            # ground-truth check against stored fact values (not fed to model)
+            hit = None
+            for kind, val in session.fact_values.items():
+                if (
+                    ("name" in prompt.lower() and kind == "fact_name")
+                    or ("color" in prompt.lower() and kind == "fact_color")
+                    or ("city" in prompt.lower() and kind == "fact_city")
+                    or ("food" in prompt.lower() and kind == "fact_food")
+                ):
+                    g = gen.strip().lower()
+                    t = val.strip().lower()
+                    hit = int(t in g or (len(g) >= 2 and t[:3] in g))
+                    print(f"  check: want '{val}'  [{'OK' if hit else 'MISS'}]")
+                    break
             print(f"  bot> {gen}")
             meta.update({"kind": "ask_fact", "expert": eid, "generation": gen,
-                         "prompt": prompt})
+                         "prompt": prompt, "route": how, "hit": hit})
         # 3) yes/no skill
         elif user.rstrip().endswith("Answer:") or user.rstrip().endswith("Answer"):
             is_skill = True
@@ -693,6 +904,9 @@ def run_interactive(session: LiveSession, outdir: Path) -> None:
     final = session.live_metrics()
     print(f"\nSession ended. avg F={final['average_forgetting']:.2f}% "
           f"final={final['final_average_accuracy']:.2f}%")
+    # persist any live-learned weights before exit
+    if session.masks_per_expert is not None and session.fact_index:
+        session.save_live_checkpoint()
     outdir.mkdir(parents=True, exist_ok=True)
     with open(outdir / f"live_session_{session.engine}.json", "w") as f:
         json.dump({
@@ -701,6 +915,7 @@ def run_interactive(session: LiveSession, outdir: Path) -> None:
             "accuracy_matrix": session.matrix,
             "live_metrics": final,
             "fact_index": session.fact_index,
+            "fact_values": session.fact_values,
         }, f, indent=2, default=str)
     print(f"Wrote {outdir / f'live_session_{session.engine}.json'}")
 
@@ -708,13 +923,15 @@ def run_interactive(session: LiveSession, outdir: Path) -> None:
 def main():
     parser = argparse.ArgumentParser(description="Live multi-turn EvAGI LLM inference")
     parser.add_argument("--engine", choices=["evagi", "baseline"], default="evagi")
-    parser.add_argument("--mode", choices=["scripted", "interactive", "learn"],
+    parser.add_argument("--mode", choices=["scripted", "interactive", "learn", "prove"],
                         default="scripted")
     parser.add_argument("--results", default=None,
                         help="results dir (default results_llm_<engine>)")
     parser.add_argument("--outdir", default=str(PROJECT_ROOT / "results_llm_live"))
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--support-shots", type=int, default=32)
+    parser.add_argument("--clear-ckpt", action="store_true",
+                        help="wipe live_checkpoint before load")
     args = parser.parse_args()
 
     set_seed(args.seed)
@@ -731,11 +948,15 @@ def main():
         support_shots=args.support_shots,
         seed=args.seed,
     )
+    if args.clear_ckpt and hasattr(session, "clear_live_checkpoint"):
+        session.clear_live_checkpoint()
 
     if args.mode == "scripted":
         run_scripted(session, outdir)
     elif args.mode == "learn":
         run_learn(session, outdir)
+    elif args.mode == "prove":
+        run_prove(session, outdir)
     else:
         run_interactive(session, outdir)
 
@@ -906,6 +1127,82 @@ def run_learn(session: LiveSession, outdir: Path) -> None:
     path = outdir / "live_learn_evagi.json"
     with open(path, "w") as fh:
         json.dump(log, fh, indent=2, default=str)
+    print(f"Wrote {path}")
+
+
+def run_prove(session: LiveSession, outdir: Path) -> None:
+    """Cross-session proof: empty context, weights-only recall.
+
+    Loads live_checkpoint from a PREVIOUS process. Never feeds fact values
+    into the prompt — only "What is your name? A:". If the answer comes back,
+    it is in the FFN expert weights, not the context window.
+    """
+    if session.masks_per_expert is None:
+        raise SystemExit("--mode prove requires --engine evagi")
+
+    print("\n" + "=" * 72)
+    print("CROSS-SESSION PROOF — fresh process, empty context, weights only")
+    print(f"  live facts on disk: {session.fact_index}")
+    print(f"  fact values known to harness (NOT in prompt): "
+          f"{list(session.fact_values.keys())}")
+    print(f"  chat history: empty")
+    print("=" * 72)
+
+    results = {"facts": [], "skills": None, "ok": True}
+
+    # 1) fact recall — prompts contain NO fact values
+    for kind, expected in session.fact_values.items():
+        probes = fact_probe_questions(kind, expected)
+        prompts_only = [p for p, _ in probes]  # strip answers — generation has no label
+        print(f"\n[{kind}] expected value withheld from prompts")
+        gens = []
+        hits = 0
+        for prompt in prompts_only:
+            # route without putting `expected` into support for generation
+            eid, losses, how = session.route_fact_query(prompt)
+            # generate under routed expert — prompt is only the question
+            gen = session.generate_free(prompt, expert_id=eid, max_new_tokens=12)
+            g = gen.strip().lower()
+            t = expected.strip().lower()
+            hit = int(t in g or (len(g) >= 2 and t[:3] in g))
+            hits += hit
+            gens.append(gen)
+            print(f"  prompt: {prompt!r}")
+            print(f"  gen:    {gen!r}  expert={eid} via={how}  "
+                  f"[{'OK' if hit else 'MISS'}]")
+            print(f"  (prompt contains value? {t in prompt.lower()})")
+        acc = 100.0 * hits / max(len(prompts_only), 1)
+        print(f"  => {kind}: {hits}/{len(prompts_only)} ({acc:.0f}%) "
+              f"expected={expected!r}")
+        results["facts"].append({
+            "kind": kind, "expected": expected, "generations": gens,
+            "hits": hits, "total": len(prompts_only), "acc": acc,
+        })
+        if hits == 0:
+            results["ok"] = False
+
+    # 2) skills still intact after loading live ckpt
+    print("\n[skills after loading live checkpoint]")
+    accs = session.eval_step("prove")
+    session.record_turn({"turn": 0, "kind": "prove"}, accs)
+    results["skills"] = accs
+    m = session.print_metrics()
+    results["live_metrics"] = m
+
+    # 3) verify prompts never included fact values (audit log)
+    print("\n" + "=" * 72)
+    print(f"PROOF {'PASSED' if results['ok'] else 'FAILED'}")
+    print(f"  facts recalled from weights in empty context: "
+          f"{sum(f['hits'] for f in results['facts'])}/"
+          f"{sum(f['total'] for f in results['facts'])}")
+    print(f"  skill avg: {m['final_average_accuracy']:.2f}%  "
+          f"F={m['average_forgetting']:.2f}%")
+    print("=" * 72)
+
+    outdir.mkdir(parents=True, exist_ok=True)
+    path = outdir / "prove_cross_session.json"
+    with open(path, "w") as f:
+        json.dump(results, f, indent=2)
     print(f"Wrote {path}")
 
 

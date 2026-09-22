@@ -6,3 +6,4 @@ __pycache__/
 *.pt
 results_llm_baseline/final_model/
 results_llm_evagi/final_model/
+results_llm_evagi/live_checkpoint/

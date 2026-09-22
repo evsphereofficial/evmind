@@ -1,0 +1,66 @@
+{
+  "facts": [
+    {
+      "kind": "fact_name",
+      "expected": "Rehan",
+      "generations": [
+        "Rehan",
+        "Rehan",
+        "Rehan"
+      ],
+      "hits": 3,
+      "total": 3,
+      "acc": 100.0
+    },
+    {
+      "kind": "fact_color",
+      "expected": "emerald",
+      "generations": [
+        "emerald",
+        "emerald"
+      ],
+      "hits": 2,
+      "total": 2,
+      "acc": 100.0
+    }
+  ],
+  "skills": {
+    "sentiment": 100.0,
+    "spelling": 100.0,
+    "capital": 100.0,
+    "plural": 100.0,
+    "antonym": 100.0
+  },
+  "ok": true,
+  "live_metrics": {
+    "average_forgetting": 0.0,
+    "final_average_accuracy": 100.0,
+    "per_task": {
+      "sentiment": {
+        "best": 100.0,
+        "final": 100.0,
+        "forgetting": 0.0
+      },
+      "spelling": {
+        "best": 100.0,
+        "final": 100.0,
+        "forgetting": 0.0
+      },
+      "capital": {
+        "best": 100.0,
+        "final": 100.0,
+        "forgetting": 0.0
+      },
+      "plural": {
+        "best": 100.0,
+        "final": 100.0,
+        "forgetting": 0.0
+      },
+      "antonym": {
+        "best": 100.0,
+        "final": 100.0,
+        "forgetting": 0.0
+      }
+    }
+  }
+}
