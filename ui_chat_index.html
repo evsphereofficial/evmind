@@ -1,0 +1,26 @@
+<!DOCTYPE html><html><head><meta charset="utf-8"><title>EvAGI Chat Live 1M</title>
+<style>body{font-family:sans-serif;max-width:800px;margin:10px auto;padding:10px}#chat{border:1px solid #ccc;height:300px;overflow-y:auto;padding:10px;background:#f9f9f9} .user{color:blue} .assistant{color:green} #metrics{font-family:monospace;background:#eee;padding:8px;margin-top:10px;white-space:pre}</style>
+</head><body>
+<h2>EvAGI Chat — Live 1M Budget, v2 Law, Support-Set Routing</h2>
+<p>Every <b>user+assistant</b> turn → <code>predict_required_weights(task)</code> `src/registry.py:69` `k0≈100 τ≈180` → <code>n = k//1536</code> neurons from <code>1M</code> pool → tiny expert `src/experiment_dynamic.py:28` trained live, frozen, `occupied` logged. No task_id.</p>
+<div id="chat"></div>
+<input id="inp" placeholder="Type message..." style="width:70%"><button onclick="send()">Send</button>
+<div id="metrics">Metrics: not yet</div>
+<script>
+function add(role, text){const d=document.getElementById('chat'); d.innerHTML+=`<div class="${role}"><b>${role}:</b> ${text}</div>`; d.scrollTop=d.scrollHeight;}
+function updateMetrics(m){document.getElementById('metrics').textContent=`Live Metrics (real-time)
+Total 1M pool: ${m.occupied}/${m.total_pool} (${(m.occupied/m.total_pool*100).toFixed(2)}%)
+Experts: ${m.num_experts}
+`+m.per_expert.map(e=>` ${e.task}: k_pred ${e.k_pred} -> actual ${e.actual} (total ${e.total})`).join('\n')+`\nAvg forgetting ${m.metric.average_forgetting?.toFixed(2)??0}% Final avg ${m.metric.final_average_accuracy?.toFixed(2)??0}%`;}
+function send(){
+ const inp=document.getElementById('inp'); const text=inp.value.trim(); if(!text) return;
+ add('user', text); inp.value='';
+ fetch("/chat",{method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({text})})
+ .then(r=>r.json()).then(j=>{
+   add('assistant', j.assistant);
+   updateMetrics(j.metrics);
+ });
+}
+setInterval(()=>{fetch("/metrics").then(r=>r.json()).then(updateMetrics);},2000);
+updateMetrics({occupied:0,total_pool:1000000,num_experts:0,per_expert:[],metric:{average_forgetting:0,final_average_accuracy:0}});
+</script></body></html>

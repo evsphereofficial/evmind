@@ -1,0 +1,29 @@
+<!DOCTYPE html><html><head><meta charset="utf-8"><title>EvAGI TinyStories-33M Live</title>
+<style>body{font-family:sans-serif;max-width:900px;margin:20px auto;padding:10px} textarea{width:100%;height:80px} button{padding:8px 16px;margin:5px} pre{background:#f5f5f5;padding:10px;white-space:pre-wrap}</style>
+</head><body>
+<h2>EvAGI TinyStories-33M — Live LLM (one 33M system, 5 LoRA experts, v2 law)</h2>
+<p>Enter a point, see LLM per-expert <code>yes/no</code> and live <code>g(support)</code> routing (no task_id, 32 support). Bare minimum.</p>
+Point x <input type="range" id="x1" min="-1" max="1" step="0.01" value="0"> <span id="v1">0</span>
+y <input type="range" id="x2" min="-1" max="1" step="0.01" value="0"> <span id="v2">0</span><br>
+<button onclick="test()">Test Live Inference</button> <button onclick="learn()">Live Learn (add this point with label)</button>
+<select id="label"><option value="1">yes</option><option value="0">no</option></select> Task
+<select id="task"><option>horizontal</option><option>vertical</option><option>circle</option><option>diagonal</option><option>xor_quadrant</option></select>
+<pre id="out"></pre>
+<script>
+function predict(){
+ const x1=parseFloat(document.getElementById('x1').value), x2=parseFloat(document.getElementById('x2').value);
+ document.getElementById('v1').textContent=x1.toFixed(2); document.getElementById('v2').textContent=x2.toFixed(2);
+}
+document.getElementById('x1').oninput=predict; document.getElementById('x2').oninput=predict; predict();
+function test(){
+ const x1=parseFloat(document.getElementById('x1').value), x2=parseFloat(document.getElementById('x2').value);
+ fetch("/predict",{method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({x1,x2})})
+ .then(r=>r.json()).then(j=>{ document.getElementById('out').textContent=JSON.stringify(j,null,2); });
+}
+function learn(){
+ const x1=parseFloat(document.getElementById('x1').value), x2=parseFloat(document.getElementById('x2').value);
+ const label=document.getElementById('label').value, task=document.getElementById('task').value;
+ fetch("/learn",{method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({x1,x2,label,task})})
+ .then(r=>r.json()).then(j=>{ document.getElementById('out').textContent="Learned: "+JSON.stringify(j,null,2); });
+}
+</script></body></html>
