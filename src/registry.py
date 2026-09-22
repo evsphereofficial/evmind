@@ -55,6 +55,20 @@ def make_regions(groups: list, region_size: int = 1000) -> list[Region]:
 # -- Modular capacity law v2 (research-reportv2.md §2) -----------------
 # 20-shape sweep (k=10,200,500,1000, batch128/5, 12GB): acc(k)=50+50*(1-exp(-(k-k0)/tau))
 # Global avg: k0≈100, tau≈180 (v1 was 115/158). Per-shape best above.
+#
+# LLM scaling: 2D models have ~4 weights/neuron. LLMs have WEIGHTS_PER_NEURON.
+# To convert: k0_llm = k0_2d * (WEIGHTS_PER_NEURON / 4).
+# TinyTalk: WEIGHTS_PER_NEURON=257, scale=64.25
+#   fact_name: k0=80*64=5140, tau=100*64=6420 → k_suff98=14,648 (~57 neurons)
+# TinyStories-33M: WEIGHTS_PER_NEURON≈1536, scale=384
+LLM_WEIGHTS_PER_NEURON: int = 257  # TinyTalk default; override via set_llm_scale()
+_LLM_SCALE: float = 1.0  # set by set_llm_scale()
+
+def set_llm_scale(weights_per_neuron: int, base_neuron_weights: int = 4):
+    """Scale k0/tau from 2D-shape units to LLM weight units."""
+    global _LLM_SCALE
+    _LLM_SCALE = weights_per_neuron / base_neuron_weights
+
 CAPACITY_PARAMS: dict[str, tuple[int, int]] = {
     "horizontal": (120, 80),   # 20-shape best
     "vertical": (150, 200),
@@ -74,6 +88,8 @@ CAPACITY_PARAMS: dict[str, tuple[int, int]] = {
     "fact": (100, 120),
     "fact_name": (80, 100),
     "fact_color": (80, 100),
+    "fact_city": (100, 120),
+    "fact_food": (100, 120),
     "default": (100, 180),  # v2 global avg
 }
 # Per-task headroom: hard tasks get more slack for disjoint allocation
@@ -107,9 +123,12 @@ def predict_required_weights(
     Inverts acc(k)=chance+(max-chance)*(1-exp(-(k-k0)/tau)).
     Returns k_alloc = (1+headroom)*k_suff, clamped to [10, N].
     Headroom defaults to per-task HEADROOM (harder tasks more).
+    k0/tau are in 2D-shape units; scaled by _LLM_SCALE for LLMs.
     """
     import math
-    k0, tau = CAPACITY_PARAMS.get(task_name, CAPACITY_PARAMS["default"])
+    k0_raw, tau_raw = CAPACITY_PARAMS.get(task_name, CAPACITY_PARAMS["default"])
+    k0 = int(k0_raw * _LLM_SCALE)
+    tau = int(tau_raw * _LLM_SCALE)
     if headroom is None:
         headroom = HEADROOM.get(task_name, HEADROOM["default"])
     if target_acc <= acc_chance:
