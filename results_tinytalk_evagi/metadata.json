@@ -1,0 +1,127 @@
+{
+  "total_params": 8278400,
+  "register": {
+    "pool": 1000000,
+    "used": 471852,
+    "remaining": 528148,
+    "pct": 47.1852,
+    "allocations": [
+      {
+        "task": "name",
+        "expert_id": 0,
+        "counts": [
+          77,
+          77,
+          77,
+          77,
+          76,
+          76,
+          76,
+          76
+        ],
+        "neurons": 612,
+        "weights": 157284
+      },
+      {
+        "task": "color",
+        "expert_id": 1,
+        "counts": [
+          77,
+          77,
+          77,
+          77,
+          76,
+          76,
+          76,
+          76
+        ],
+        "neurons": 612,
+        "weights": 157284
+      },
+      {
+        "task": "city",
+        "expert_id": 2,
+        "counts": [
+          77,
+          77,
+          77,
+          77,
+          76,
+          76,
+          76,
+          76
+        ],
+        "neurons": 612,
+        "weights": 157284
+      }
+    ]
+  },
+  "training": {
+    "name": {
+      "expert_id": 0,
+      "k": 157443,
+      "neurons": 612,
+      "weights": 157284,
+      "loss": 0.0004141061508562416
+    },
+    "color": {
+      "expert_id": 1,
+      "k": 157443,
+      "neurons": 612,
+      "weights": 157284,
+      "loss": 0.0034332347568124533
+    },
+    "city": {
+      "expert_id": 2,
+      "k": 157443,
+      "neurons": 612,
+      "weights": 157284,
+      "loss": 0.0009415667736902833
+    }
+  },
+  "baseline": {
+    "name": {
+      "reply": "My name is Timmy.",
+      "hit": false
+    },
+    "color": {
+      "reply": "I like blue, blue and blue.",
+      "hit": false
+    },
+    "city": {
+      "reply": "I live here.",
+      "hit": false
+    }
+  },
+  "post": {
+    "name": {
+      "reply": "Rehan!!!!!!!!!!!!!!!!!!!!!!!!!!!",
+      "hit": true
+    },
+    "color": {
+      "reply": "emerald!!!!!!!!!!!!!!!!!!!!!!!!!!!",
+      "hit": true
+    },
+    "city": {
+      "reply": "Tokyo!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
+      "hit": true
+    }
+  },
+  "proof": {
+    "name": {
+      "reply": "Rehan!!!!!!!!!!!!!!!!!!!!!!!!!!!",
+      "hit": true,
+      "prompt_leaked": false
+    },
+    "color": {
+      "reply": "emerald!!!!!!!!!!!!!!!!!!!!!!!!!!!",
+      "hit": true,
+      "prompt_leaked": false
+    },
+    "city": {
+      "reply": "Tokyo!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
+      "hit": true,
+      "prompt_leaked": false
+    }
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "alpha": 0.0,
+  "k0": 102257.00674495797,
+  "tau": 7398.750868235518,
+  "k_suff98": 131201.09035292678,
+  "max_acc": 1.0,
+  "weights_per_neuron": 257,
+  "model": "TinyTalk-8.3M",
+  "neurons_at_suff": 510,
+  "ffn_total": 4096,
+  "pct_ffn": 12.451171875
+}

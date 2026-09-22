@@ -1,0 +1,119 @@
+{
+  "model_id": "TheREZOR/TinyTalk",
+  "total_params": 8278400,
+  "ffn_neurons": 4096,
+  "inter_sizes": [
+    512,
+    512,
+    512,
+    512,
+    512,
+    512,
+    512,
+    512
+  ],
+  "evagi_stack": "Register + V2 + HardMasks + Governors + HRM Router",
+  "facts_taught": [
+    "name",
+    "color",
+    "city"
+  ],
+  "training_log": {
+    "name": {
+      "expert_id": 0,
+      "k_pred": 329666,
+      "neurons": [
+        65,
+        65,
+        65,
+        65,
+        64,
+        64,
+        64,
+        64
+      ],
+      "owned": 516,
+      "final_loss": 6.144596409285441e-05
+    },
+    "color": {
+      "expert_id": 1,
+      "k_pred": 329666,
+      "neurons": [
+        65,
+        65,
+        65,
+        65,
+        64,
+        64,
+        64,
+        64
+      ],
+      "owned": 516,
+      "final_loss": 6.149668479338288e-05
+    },
+    "city": {
+      "expert_id": 2,
+      "k_pred": 329666,
+      "neurons": [
+        65,
+        65,
+        65,
+        65,
+        64,
+        64,
+        64,
+        64
+      ],
+      "owned": 516,
+      "final_loss": 8.6653781181667e-05
+    }
+  },
+  "baseline_results": {
+    "name": {
+      "reply": "I'm a nurse.",
+      "hit": false
+    },
+    "color": {
+      "reply": "I like it.",
+      "hit": false
+    },
+    "city": {
+      "reply": "I live in a few months ago.",
+      "hit": false
+    }
+  },
+  "post_results": {
+    "name": {
+      "reply": "I am!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
+      "hit": false
+    },
+    "color": {
+      "reply": "Anything!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
+      "hit": false
+    },
+    "city": {
+      "reply": "Ellie!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
+      "hit": false
+    }
+  },
+  "proof_results": {
+    "name": {
+      "reply": "Everest!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
+      "hit": false,
+      "prompt_leaked": false
+    },
+    "color": {
+      "reply": "I!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
+      "hit": false,
+      "prompt_leaked": false
+    },
+    "city": {
+      "reply": "just!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
+      "hit": false,
+      "prompt_leaked": false
+    }
+  },
+  "pool_occupied": 1548,
+  "pool_total": 4096,
+  "pool_pct": 37.79296875
+}
