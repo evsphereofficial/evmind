@@ -1,0 +1,6 @@
+task,initial_accuracy,best_accuracy,final_accuracy,forgetting
+sentiment,100.0,100.0,100.0,0.0
+spelling,100.0,100.0,100.0,0.0
+capital,100.0,100.0,100.0,0.0
+plural,100.0,100.0,100.0,0.0
+antonym,100.0,100.0,100.0,0.0

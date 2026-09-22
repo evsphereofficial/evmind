@@ -1,0 +1,44 @@
+# EvMind EvAGI LLM — neuron experts + register + per-expert governors + HRM router
+# on TinyStories-33M. Compare to results_llm_baseline (17.53% forget / 82.47% final).
+#
+# Run:
+#   .venv/bin/python -m src.experiment_llm_evagi --config configs/llm_evagi.yaml
+
+run_name: llm_evagi
+
+llm:
+  model_id: roneneldan/TinyStories-33M
+  max_length: 96
+  lr: 0.0001
+  batch_size: 16
+  epochs_per_task: 3
+  train_samples: 1200
+  test_samples: 300
+  probe: true
+  # law-k / neuron_div -> neuron counts (8 => ~700 neurons total, ~5.7% pool)
+  neuron_div: 8
+  support_shots: 32
+  router_hidden: 16
+  gov_hidden: 12
+  gov_l1: 0.0001
+
+tasks:
+  - name: sentiment
+    type: llm_sentiment
+  - name: spelling
+    type: llm_spelling
+  - name: capital
+    type: llm_capital
+  - name: plural
+    type: llm_plural
+  - name: antonym
+    type: llm_antonym
+
+train:
+  seed: 0
+  learning_rate: 0.0001
+  batch_size: 16
+  epochs_per_task: 3
+  optimizer: adamw
+  weight_decay: 0.01
+  num_workers: 0

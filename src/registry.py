@@ -62,6 +62,14 @@ CAPACITY_PARAMS: dict[str, tuple[int, int]] = {
     "diagonal": (100, 150),
     "xor": (150, 300),
     "xor_quadrant": (150, 300),
+    # LLM yes/no skills — transferred priors from 2D analogs
+    # (sentiment~horizontal easy, plural/antonym~circle/xor hard).
+    # Recalibrate with an LLM k-sweep when budget allows.
+    "sentiment": (120, 80),
+    "spelling": (150, 200),
+    "capital": (100, 150),
+    "plural": (50, 300),
+    "antonym": (150, 300),
     "default": (100, 180),  # v2 global avg
 }
 # Per-task headroom: hard tasks get more slack for disjoint allocation
@@ -72,6 +80,11 @@ HEADROOM: dict[str, float] = {
     "diagonal": 0.2,
     "xor": 0.5,
     "xor_quadrant": 0.5,
+    "sentiment": 0.2,
+    "spelling": 0.2,
+    "capital": 0.2,
+    "plural": 0.4,
+    "antonym": 0.5,
     "default": 0.2,
 }
 

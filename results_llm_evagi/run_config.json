@@ -1,0 +1,335 @@
+{
+  "model_id": "roneneldan/TinyStories-33M",
+  "n_params": 68514048,
+  "probe": {
+    "sentiment": 50.67,
+    "spelling": 50.33,
+    "capital": 48.0,
+    "plural": 39.0,
+    "antonym": 49.33
+  },
+  "metric": {
+    "initial": [
+      100.0,
+      100.0,
+      100.0,
+      100.0,
+      100.0
+    ],
+    "best": [
+      100.0,
+      100.0,
+      100.0,
+      100.0,
+      100.0
+    ],
+    "final": [
+      100.0,
+      100.0,
+      100.0,
+      100.0,
+      100.0
+    ],
+    "forgetting": [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "average_forgetting": 0.0,
+    "final_average_accuracy": 100.0
+  },
+  "register": {
+    "pool": 12288,
+    "occupied": 678,
+    "allocations": [
+      {
+        "task": "sentiment",
+        "expert_id": 0,
+        "counts": [
+          15,
+          15,
+          15,
+          14
+        ],
+        "owned": 59
+      },
+      {
+        "task": "spelling",
+        "expert_id": 1,
+        "counts": [
+          31,
+          31,
+          31,
+          31
+        ],
+        "owned": 124
+      },
+      {
+        "task": "capital",
+        "expert_id": 2,
+        "counts": [
+          23,
+          23,
+          23,
+          22
+        ],
+        "owned": 91
+      },
+      {
+        "task": "plural",
+        "expert_id": 3,
+        "counts": [
+          47,
+          47,
+          46,
+          46
+        ],
+        "owned": 186
+      },
+      {
+        "task": "antonym",
+        "expert_id": 4,
+        "counts": [
+          55,
+          55,
+          54,
+          54
+        ],
+        "owned": 218
+      }
+    ]
+  },
+  "routing_log": [
+    {
+      "phase": 0,
+      "task": "sentiment",
+      "support_pick": 0,
+      "oracle": 0,
+      "support_nll": [
+        0.004
+      ],
+      "live_acc": 100.0,
+      "oracle_acc": 100.0
+    },
+    {
+      "phase": 1,
+      "task": "sentiment",
+      "support_pick": 0,
+      "oracle": 0,
+      "support_nll": [
+        0.004,
+        2.7327
+      ],
+      "live_acc": 100.0,
+      "oracle_acc": 100.0
+    },
+    {
+      "phase": 1,
+      "task": "spelling",
+      "support_pick": 1,
+      "oracle": 1,
+      "support_nll": [
+        5.1053,
+        0.0018
+      ],
+      "live_acc": 100.0,
+      "oracle_acc": 100.0
+    },
+    {
+      "phase": 2,
+      "task": "sentiment",
+      "support_pick": 0,
+      "oracle": 0,
+      "support_nll": [
+        0.0041,
+        2.7352,
+        1.7388
+      ],
+      "live_acc": 100.0,
+      "oracle_acc": 100.0
+    },
+    {
+      "phase": 2,
+      "task": "spelling",
+      "support_pick": 1,
+      "oracle": 1,
+      "support_nll": [
+        5.1078,
+        0.0018,
+        1.3484
+      ],
+      "live_acc": 100.0,
+      "oracle_acc": 100.0
+    },
+    {
+      "phase": 2,
+      "task": "capital",
+      "support_pick": 2,
+      "oracle": 2,
+      "support_nll": [
+        5.9422,
+        7.1258,
+        0.0083
+      ],
+      "live_acc": 100.0,
+      "oracle_acc": 100.0
+    },
+    {
+      "phase": 3,
+      "task": "sentiment",
+      "support_pick": 0,
+      "oracle": 0,
+      "support_nll": [
+        0.0041,
+        2.7376,
+        1.7411,
+        5.2499
+      ],
+      "live_acc": 100.0,
+      "oracle_acc": 100.0
+    },
+    {
+      "phase": 3,
+      "task": "spelling",
+      "support_pick": 1,
+      "oracle": 1,
+      "support_nll": [
+        5.1103,
+        0.0018,
+        1.3489,
+        3.5698
+      ],
+      "live_acc": 100.0,
+      "oracle_acc": 100.0
+    },
+    {
+      "phase": 3,
+      "task": "capital",
+      "support_pick": 2,
+      "oracle": 2,
+      "support_nll": [
+        5.9447,
+        7.126,
+        0.0083,
+        3.3528
+      ],
+      "live_acc": 100.0,
+      "oracle_acc": 100.0
+    },
+    {
+      "phase": 3,
+      "task": "plural",
+      "support_pick": 3,
+      "oracle": 3,
+      "support_nll": [
+        5.8977,
+        9.3994,
+        2.78,
+        0.0006
+      ],
+      "live_acc": 100.0,
+      "oracle_acc": 100.0
+    },
+    {
+      "phase": 4,
+      "task": "sentiment",
+      "support_pick": 0,
+      "oracle": 0,
+      "support_nll": [
+        0.0041,
+        2.74,
+        1.7434,
+        5.2519,
+        3.7143
+      ],
+      "live_acc": 100.0,
+      "oracle_acc": 100.0
+    },
+    {
+      "phase": 4,
+      "task": "spelling",
+      "support_pick": 1,
+      "oracle": 1,
+      "support_nll": [
+        5.1128,
+        0.0018,
+        1.3494,
+        3.5714,
+        9.3254
+      ],
+      "live_acc": 100.0,
+      "oracle_acc": 100.0
+    },
+    {
+      "phase": 4,
+      "task": "capital",
+      "support_pick": 2,
+      "oracle": 2,
+      "support_nll": [
+        5.9472,
+        7.1262,
+        0.0084,
+        3.355,
+        12.0777
+      ],
+      "live_acc": 100.0,
+      "oracle_acc": 100.0
+    },
+    {
+      "phase": 4,
+      "task": "plural",
+      "support_pick": 3,
+      "oracle": 3,
+      "support_nll": [
+        5.9002,
+        9.3975,
+        2.7816,
+        0.0006,
+        9.3283
+      ],
+      "live_acc": 100.0,
+      "oracle_acc": 100.0
+    },
+    {
+      "phase": 4,
+      "task": "antonym",
+      "support_pick": 4,
+      "oracle": 4,
+      "support_nll": [
+        3.5541,
+        5.4788,
+        6.6389,
+        3.1954,
+        0.0009
+      ],
+      "live_acc": 100.0,
+      "oracle_acc": 100.0
+    }
+  ],
+  "llm_cfg": {
+    "model_id": "roneneldan/TinyStories-33M",
+    "max_length": 96,
+    "lr": 0.0001,
+    "batch_size": 16,
+    "epochs_per_task": 3,
+    "train_samples": 1200,
+    "test_samples": 300,
+    "probe": true,
+    "neuron_div": 8,
+    "support_shots": 32,
+    "router_hidden": 16,
+    "gov_hidden": 12,
+    "gov_l1": 0.0001,
+    "seed": 0,
+    "weight_decay": 0.01
+  },
+  "task_names": [
+    "sentiment",
+    "spelling",
+    "capital",
+    "plural",
+    "antonym"
+  ]
+}

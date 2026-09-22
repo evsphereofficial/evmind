@@ -1,0 +1,40 @@
+# EvMind LLM baseline — catastrophic forgetting on TinyStories-33M.
+# Plain sequential fine-tuning, no protection. Probe first, then 5 language
+# tasks (sentiment/spelling/capital/plural/antonym), yes/no next-token acc.
+#
+# Run:
+#   .venv/bin/python -m src.experiment_llm_baseline --config configs/llm_baseline.yaml
+
+run_name: llm_baseline
+
+llm:
+  model_id: roneneldan/TinyStories-33M
+  max_length: 96
+  lr: 0.0001
+  batch_size: 16
+  epochs_per_task: 3
+  train_samples: 1200
+  test_samples: 300
+  probe: true
+  # weight decay / optimizer left at AdamW defaults via train section
+
+tasks:
+  - name: sentiment
+    type: llm_sentiment
+  - name: spelling
+    type: llm_spelling
+  - name: capital
+    type: llm_capital
+  - name: plural
+    type: llm_plural
+  - name: antonym
+    type: llm_antonym
+
+train:
+  seed: 0
+  learning_rate: 0.0001
+  batch_size: 16
+  epochs_per_task: 3
+  optimizer: adamw
+  weight_decay: 0.01
+  num_workers: 0

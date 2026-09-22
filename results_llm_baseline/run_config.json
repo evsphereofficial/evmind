@@ -1,0 +1,61 @@
+{
+  "model_id": "roneneldan/TinyStories-33M",
+  "n_params": 68514048,
+  "probe": {
+    "sentiment": 50.67,
+    "spelling": 50.33,
+    "capital": 48.0,
+    "plural": 39.0,
+    "antonym": 49.33
+  },
+  "metric": {
+    "initial": [
+      100.0,
+      100.0,
+      100.0,
+      100.0,
+      100.0
+    ],
+    "best": [
+      100.0,
+      100.0,
+      100.0,
+      100.0,
+      100.0
+    ],
+    "final": [
+      58.0,
+      91.33,
+      67.67,
+      95.33,
+      100.0
+    ],
+    "forgetting": [
+      42.0,
+      8.670000000000002,
+      32.33,
+      4.670000000000002,
+      0.0
+    ],
+    "average_forgetting": 17.534,
+    "final_average_accuracy": 82.466
+  },
+  "llm_cfg": {
+    "model_id": "roneneldan/TinyStories-33M",
+    "max_length": 96,
+    "lr": 0.0001,
+    "batch_size": 16,
+    "epochs_per_task": 3,
+    "train_samples": 1200,
+    "test_samples": 300,
+    "probe": true,
+    "seed": 0
+  },
+  "task_names": [
+    "sentiment",
+    "spelling",
+    "capital",
+    "plural",
+    "antonym"
+  ]
+}
