@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-EvAGI Interactive Live Learning — TinyTalk.
-Tell the model to remember/learn anything. Ask it later. Cross-session proof.
-No hardcoded facts — everything is dynamic.
+EvAGI Interactive Live Learning — TinyTalk (V3 dynamic allocation).
+Each fact gets a DIFFERENT number of neurons based on difficulty.
+No hardcoded neuron counts — Equation V3 calculates per-fact.
 """
 
 import json, math, torch, torch.nn as nn, re
@@ -12,15 +12,22 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 MODEL_ID = "TheREZOR/TinyTalk"
 WEIGHTS_PER_NEURON = 257
 WEIGHT_POOL = 1_000_000
-K0 = 102_257
-TAU = 7_399
 SAVE_DIR = Path("results_tinytalk_interactive")
 SAVE_DIR.mkdir(exist_ok=True)
 CHECKPOINT = SAVE_DIR / "evagi_state.pt"
 
+# V3 calibration constants (from 8-point sweep on TinyTalk)
+# These are BASE values — per-fact k0/tau are derived from probing
+K0_BASE = 102_257
+TAU_BASE = 7_399
+
+# Probe config: small initial allocation to measure difficulty
+PROBE_NEURONS = 8  # neurons for initial difficulty probe
+PROBE_EPOCHS = 5
+
 
 # ============================================================================
-# EvAGI Components (same as calibration)
+# EvAGI Components
 # ============================================================================
 class SoftExpertContext:
     def __init__(self, layers, masks, alpha=0.0):
@@ -89,16 +96,6 @@ class WeightRegister:
                                  "neurons": actual, "weights": actual * WEIGHTS_PER_NEURON})
         return masks
 
-def predict_weights(target_acc=98.0):
-    frac = target_acc / 100.0
-    return int(math.ceil(1.2 * (K0 - TAU * math.log(1 - frac))))
-
-def weights_to_counts(k, inter_sizes):
-    n = max(len(inter_sizes), k // WEIGHTS_PER_NEURON)
-    base = n // len(inter_sizes)
-    rem = n % len(inter_sizes)
-    return [base + (1 if i < rem else 0) for i in range(len(inter_sizes))]
-
 def tokenize_qa(tok, pairs, max_length=128):
     ids, attn, labels = [], [], []
     for p, a in pairs:
@@ -119,6 +116,7 @@ def train_expert(model, tokenizer, layers, qa_pairs, masks, device, epochs=15, l
     params = [p for p in model.parameters() if p.requires_grad]
     opt = torch.optim.AdamW(params, lr=lr, weight_decay=0.01)
     model.train()
+    losses = []
     for ep in range(epochs):
         running = n = 0
         for ids, attn, lab in loader:
@@ -136,116 +134,157 @@ def train_expert(model, tokenizer, layers, qa_pairs, masks, device, epochs=15, l
             torch.nn.utils.clip_grad_norm_(params, 1.0)
             opt.step()
             running += loss.item(); n += 1
+        losses.append(running / max(n, 1))
     model.eval()
-    return running / max(n, 1)
+    return losses
 
 
 # ============================================================================
-# Fact Parser — dynamic, not hardcoded
+# V3 Dynamic Allocation: probe difficulty → calculate k → allocate
+# ============================================================================
+def v3_probe_and_allocate(model, tokenizer, layers, qa_pairs, inter_sizes,
+                          device, register, expert_id, fact_name):
+    """Two-phase allocation:
+    Phase 1: Train a tiny probe (PROBE_NEURONS) and measure convergence speed.
+    Phase 2: Use convergence rate to set k0/tau → allocate full expert.
+    
+    Easy facts (fast convergence) → fewer neurons
+    Hard facts (slow convergence) → more neurons
+    """
+    n_layers = len(inter_sizes)
+
+    # Phase 1: Probe with small allocation
+    probe_counts = [max(1, PROBE_NEURONS // n_layers)] * n_layers
+    probe_masks = []
+    for li, take in enumerate(probe_counts):
+        free = torch.where(~register.occupied[li])[0]
+        chosen = free[:min(take, free.numel())]
+        mask = torch.zeros(inter_sizes[li], dtype=torch.bool, device=device)
+        mask[chosen] = True
+        probe_masks.append(mask)
+
+    # Train probe
+    probe_losses = train_expert(model, tokenizer, layers, qa_pairs, probe_masks,
+                                device, epochs=PROBE_EPOCHS, lr=5e-4)
+
+    # Measure difficulty: how fast did loss drop?
+    # difficulty = final_loss / initial_loss (lower = easier)
+    if probe_losses[0] > 0:
+        convergence = probe_losses[-1] / probe_losses[0]  # 0.0 = trivial, 1.0 = impossible
+    else:
+        convergence = 0.0
+
+    # Free probe neurons (unmark them)
+    for li, m in enumerate(probe_masks):
+        register.occupied[li] &= ~m
+
+    # Phase 2: Calculate k using V3 with difficulty-adjusted parameters
+    # Use INITIAL loss as difficulty proxy (higher = harder = needs more neurons)
+    # TinyTalk base initial loss ~5.0 for random facts; scale around that.
+    init_loss = probe_losses[0]
+    base_loss = 5.0  # typical initial loss for random tokens
+    difficulty = max(0.0, min(1.0, (init_loss - 3.0) / 5.0))  # 0=easy, 1=hard
+
+    # Easy facts (difficulty < 0.3): fewer neurons
+    # Hard facts (difficulty > 0.7): more neurons
+    scale = 0.3 + difficulty * 2.7  # linear map [0.3, 3.0]
+
+    k0_fact = int(K0_BASE * scale)
+    tau_fact = int(TAU_BASE * scale)
+
+    # k_suff for 98% accuracy
+    frac = 0.98
+    k_suff = k0_fact - tau_fact * math.log(1.0 - frac)
+    headroom = 1.2
+    k_alloc = int(math.ceil(headroom * k_suff))
+
+    # Convert to neuron counts
+    n_neurons = max(n_layers, k_alloc // WEIGHTS_PER_NEURON)
+    base = n_neurons // n_layers
+    rem = n_neurons % n_layers
+    counts = [base + (1 if i < rem else 0) for i in range(n_layers)]
+
+    print(f"    probe: loss {probe_losses[0]:.3f}→{probe_losses[-1]:.4f} "
+          f"difficulty={difficulty:.3f} scale={scale:.2f}")
+    print(f"    V3: k0={k0_fact}, tau={tau_fact}, k_alloc={k_alloc}, neurons={sum(counts)}")
+
+    # Allocate full expert
+    masks = register.allocate(fact_name, counts, expert_id)
+    return masks, {
+        "difficulty": difficulty, "scale": scale,
+        "k0": k0_fact, "tau": tau_fact,
+        "k_alloc": k_alloc, "neurons": sum(counts),
+        "probe_loss_start": probe_losses[0],
+        "probe_loss_end": probe_losses[-1],
+    }
+
+
+# ============================================================================
+# Fact Parser
 # ============================================================================
 def parse_learn_command(text):
-    """Parse 'remember/learn/know that X is Y' from natural language.
-    Returns (key, value) or None.
-    """
     t = text.lower().strip()
-    
-    # Reject questions — these should be answered, not learned
     if t.startswith(("what", "where", "when", "how", "who", "why",
                       "which", "is ", "are ", "do ", "does ", "can ", "could ",
-                      "would ", "should ", "tell me ", "say ")):
-        # But allow "tell me your X" as learn
+                      "would ", "should ")):
         if not re.match(r"tell me your\b", t):
             return None
-    
-    # Strip common prefixes
     for prefix in ["remember ", "learn ", "know that ", "know ", "note that ",
                     "note ", "store that ", "save that ", "save "]:
         if t.startswith(prefix):
             t = t[len(prefix):]
             break
-    
-    # Strip trailing punctuation
     t = t.rstrip(".,!?;:")
-    
-    # Pattern: "my X is Y"
     m = re.match(r"my\s+(?:favorite\s+)?(\w+)\s+is\s+(.+)", t)
-    if m:
-        return m.group(1).strip(), m.group(2).strip()
-    
-    # Pattern: "I like/love/prefer X"
+    if m: return m.group(1).strip(), m.group(2).strip()
     m = re.match(r"i\s+(?:like|love|prefer|enjoy)\s+(.+)", t)
-    if m:
-        return "food", m.group(1).strip()
-    
-    # Pattern: "I work at/in X"
+    if m: return "food", m.group(1).strip()
     m = re.match(r"i\s+work\s+(?:at|in|for)\s+(.+)", t)
-    if m:
-        return "work", m.group(1).strip()
-    
-    # Pattern: "I live in/at X"
+    if m: return "work", m.group(1).strip()
     m = re.match(r"i\s+live\s+(?:in|at|on)\s+(.+)", t)
-    if m:
-        return "city", m.group(1).strip()
-    
-    # Pattern: "X is Y" (generic fact)
+    if m: return "city", m.group(1).strip()
     m = re.match(r"(\w[\w\s]*?)\s+is\s+(.+)", t)
-    if m:
-        return m.group(1).strip(), m.group(2).strip()
-    
+    if m: return m.group(1).strip(), m.group(2).strip()
     return None
 
 def make_prompt(key, value):
-    """Generate training prompts for a fact."""
-    return [
-        f"User: What is your {key}?\nBot:",
-        f"User: What's your {key}?\nBot:",
-        f"User: Tell me your {key}\nBot:",
-    ]
-
-def make_test_prompts(key):
-    """Generate test prompts for a fact."""
-    return [
-        f"User: What is your {key}?\nBot:",
-        f"User: What's your {key}?\nBot:",
-        f"User: Hey what is your {key}?\nBot:",
-    ]
+    return [f"User: What is your {key}?\nBot:",
+            f"User: What's your {key}?\nBot:",
+            f"User: Tell me your {key}\nBot:"]
 
 def route_keyword(prompt, facts_dict):
-    """Route prompt to expert by keyword matching on both the question AND the fact key."""
     pl = prompt.lower()
-    # Direct key match
     for kind in sorted(facts_dict.keys(), key=len, reverse=True):
-        if kind in pl:
-            return kind
-    # Semantic aliases
+        if kind in pl: return kind
     aliases = {
         "name": ["name", "called", "who are"],
-        "color": ["color", "colour", "favorite color", "like"],
+        "color": ["color", "colour", "favorite color"],
         "city": ["city", "live", "home", "where", "from"],
-        "food": ["food", "eat", "like to eat", "favorite"],
+        "food": ["food", "eat", "favorite food", "favorite"],
         "work": ["work", "job", "employ", "company"],
     }
     for kind, words in aliases.items():
         if kind in facts_dict:
             for w in words:
-                if w in pl:
-                    return kind
+                if w in pl: return kind
     return None
 
 
 # ============================================================================
-# Interactive Session
+# Main
 # ============================================================================
 def main():
     print("=" * 70)
-    print("EvAGI Interactive Live Learning — TinyTalk (8.3M)")
+    print("EvAGI Interactive Live Learning — V3 Dynamic Allocation")
     print("=" * 70)
+    print("Each fact gets DIFFERENT neurons based on difficulty probing.")
+    print()
     print("Commands:")
-    print("  tell me to remember/learn/know X  — learn a new fact")
-    print("  ask a question                     — recall from learned facts")
-    print("  facts                              — list learned facts")
-    print("  save                               — save checkpoint")
-    print("  quit                               — exit (auto-saves)")
+    print("  remember/learn/know X  — learn a new fact (V3 dynamic)")
+    print("  ask a question         — recall from learned facts")
+    print("  facts                  — list facts with neuron counts")
+    print("  save                   — save checkpoint")
+    print("  quit                   — exit (auto-saves)")
     print()
 
     tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
@@ -259,20 +298,19 @@ def main():
     register = WeightRegister(inter_sizes, device)
 
     masks_per_expert = []
-    fact_index = {}    # kind -> expert_id
-    fact_values = {}   # kind -> value
-    fact_keys = []     # ordered list of all learned kinds
+    fact_index = {}
+    fact_values = {}
+    fact_keys = []
+    fact_meta = {}  # kind -> V3 allocation metadata
 
-    # Load checkpoint if exists
+    # Load checkpoint
     if CHECKPOINT.exists():
-        # Load trained model weights
         model_dir = SAVE_DIR / "model"
         if model_dir.exists():
-            trained_model = AutoModelForCausalLM.from_pretrained(model_dir, dtype=torch.float32)
-            model.load_state_dict(trained_model.state_dict())
-            del trained_model
-            print(f"  Loaded trained model weights from {model_dir}")
-        # Load EvAGI state
+            trained = AutoModelForCausalLM.from_pretrained(model_dir, dtype=torch.float32)
+            model.load_state_dict(trained.state_dict())
+            del trained
+            print(f"  Loaded trained model")
         ov = torch.load(CHECKPOINT, map_location=device, weights_only=False)
         for em in ov["masks"]:
             masks_per_expert.append([m.to(device) if isinstance(m, torch.Tensor)
@@ -281,15 +319,12 @@ def main():
         fact_index.update(ov["fact_index"])
         fact_values.update(ov["fact_values"])
         fact_keys = ov.get("fact_keys", list(fact_index.keys()))
+        fact_meta = ov.get("fact_meta", {})
         register.used = ov.get("weights_used", 0)
-        # Rebuild occupied from masks
         for eid, expert_masks in enumerate(masks_per_expert):
             for li, m in enumerate(expert_masks):
                 register.occupied[li] |= m
-        print(f"  Loaded checkpoint: {len(fact_index)} facts, "
-              f"{register.used:,}/{register.pool:,} weights")
-
-    route_keyword.facts = fact_keys
+        print(f"  Loaded: {len(fact_index)} facts, {register.used:,}/{register.pool:,} weights")
 
     def generate(prompt, expert_mask=None, max_tokens=30):
         inputs = tokenizer(prompt, return_tensors="pt").to(device)
@@ -307,110 +342,107 @@ def main():
                                 skip_special_tokens=True).strip()
 
     def save_checkpoint():
-        # Save model weights (the trained FFN changes)
         model.save_pretrained(SAVE_DIR / "model")
         tokenizer.save_pretrained(SAVE_DIR / "model")
-        # Save EvAGI state (masks, facts, register)
         torch.save({
             "masks": [[m.cpu() for m in e] for e in masks_per_expert],
             "fact_index": fact_index,
             "fact_values": fact_values,
             "fact_keys": fact_keys,
+            "fact_meta": fact_meta,
             "weights_used": register.used,
         }, CHECKPOINT)
-        print(f"  Saved: {SAVE_DIR / 'model'} + {CHECKPOINT}")
+        print(f"  Saved: {SAVE_DIR}")
 
-    # Chat loop
-    print("Ready. Type your message.\n")
+    print("Ready.\n")
+
     while True:
         try:
             user_input = input("You: ").strip()
         except (EOFError, KeyboardInterrupt):
-            print("\nSaving and exiting...")
-            save_checkpoint()
-            break
+            print("\nSaving..."); save_checkpoint(); break
 
-        if not user_input:
-            continue
-
+        if not user_input: continue
         if user_input.lower() in ("quit", "exit", "q"):
-            save_checkpoint()
-            break
+            save_checkpoint(); break
 
         if user_input.lower() == "facts":
             if not fact_keys:
-                print("  No facts learned yet.\n")
+                print("  No facts yet.\n")
             else:
                 print(f"  Learned facts ({len(fact_keys)}):")
                 for k in fact_keys:
                     eid = fact_index[k]
                     v = fact_values[k]
-                    w = masks_per_expert[eid][0].sum().item() * WEIGHTS_PER_NEURON if masks_per_expert else 0
-                    print(f"    [{eid}] {k} = {v} ({w:,} weights)")
-                print()
+                    n = int(masks_per_expert[eid][0].sum().item())
+                    w = n * WEIGHTS_PER_NEURON
+                    m = fact_meta.get(k, {})
+                    conv = m.get("difficulty", "?")
+                    print(f"    [{eid}] {k} = {v}  "
+                          f"({n} neurons, {w:,} weights, convergence={conv})")
+                print(f"  Pool: {register.used:,}/{register.pool:,} "
+                      f"({100*register.used/register.pool:.1f}%)\n")
             continue
 
         if user_input.lower() == "save":
-            save_checkpoint()
-            continue
+            save_checkpoint(); continue
 
-        # Try to parse as learn command
+        # Parse learn command
         parsed = parse_learn_command(user_input)
         if parsed:
             key, value = parsed
             print(f"  Learning: {key} = {value}")
 
-            # Check if key already exists — reallocate
             if key in fact_index:
                 eid = fact_index[key]
-                print(f"  Updating existing expert {eid} for '{key}'")
+                print(f"  Updating expert {eid}")
+                # Reallocate with V3
+                masks, meta = v3_probe_and_allocate(
+                    model, tokenizer, layers,
+                    [(p, " " + value) for p in make_prompt(key, value)],
+                    inter_sizes, device, register, eid, key)
+                masks_per_expert[eid] = masks
             else:
                 eid = len(masks_per_expert)
-                k_alloc = predict_weights()
-                counts = weights_to_counts(k_alloc, inter_sizes)
-                masks = register.allocate(key, counts, eid)
+                qa = [(p, " " + value) for p in make_prompt(key, value)]
+                masks, meta = v3_probe_and_allocate(
+                    model, tokenizer, layers, qa,
+                    inter_sizes, device, register, eid, key)
                 masks_per_expert.append(masks)
                 fact_index[key] = eid
                 fact_keys.append(key)
-                route_keyword.facts = fact_keys
-                print(f"  Allocated expert {eid}: {int(masks_per_expert[eid][0].sum().item())} neurons")
 
             fact_values[key] = value
-            prompts = make_prompt(key, value)
-            qa_pairs = [(p, " " + value) for p in prompts]
+            fact_meta[key] = meta
 
-            final_loss = train_expert(model, tokenizer, layers, qa_pairs,
-                                     masks_per_expert[eid], device, epochs=15, lr=5e-4)
+            # Full training with allocated neurons
+            final_losses = train_expert(
+                model, tokenizer, layers,
+                [(p, " " + value) for p in make_prompt(key, value)],
+                masks_per_expert[eid], device, epochs=15, lr=5e-4)
 
-            # Quick recall test
-            test_prompts = make_test_prompts(key)
-            mask = masks_per_expert[eid]
-            reply = generate(test_prompts[0], expert_mask=mask)
+            # Recall test
+            test_prompt = make_prompt(key, value)[0]
+            reply = generate(test_prompt, expert_mask=masks_per_expert[eid])
             hit = value.lower() in reply.lower()
-
-            print(f"  Trained: loss={final_loss:.4f}, recall={reply[:40]} "
-                  f"{'[OK]' if hit else '[MISS]'}")
-            print(f"  Pool: {register.used:,}/{register.pool:,} weights "
+            n = int(masks_per_expert[eid][0].sum().item())
+            print(f"  Trained: loss={final_losses[-1]:.4f}, "
+                  f"recall={reply[:30]} {'[OK]' if hit else '[MISS]'}")
+            print(f"  Pool: {register.used:,}/{register.pool:,} "
                   f"({100*register.used/register.pool:.1f}%)\n")
             continue
 
-        # Otherwise — try to answer as a question
-        # Route to relevant expert
+        # Answer question
         routed = route_keyword(user_input, fact_values)
-
         if routed and routed in fact_index:
             eid = fact_index[routed]
-            mask = masks_per_expert[eid]
             prompt = user_input if user_input.rstrip().endswith((":", "A:", "Answer:")) else user_input.rstrip() + " A:"
-            reply = generate(prompt, expert_mask=mask)
+            reply = generate(prompt, expert_mask=masks_per_expert[eid])
             hit = fact_values[routed].lower() in reply.lower()
-            print(f"  [expert {eid}/{routed}] {reply}")
-            if hit:
-                print(f"  Recall: {fact_values[routed]} [OK]\n")
-            else:
-                print(f"  Expected: {fact_values[routed]} [MISS]\n")
+            n = int(masks_per_expert[eid][0].sum().item())
+            print(f"  [expert {eid}/{routed}, {n} neurons] {reply}")
+            print(f"  {'Recall OK' if hit else 'Expected: ' + fact_values[routed]}\n")
         else:
-            # No expert match — free generation with all experts
             prompt = user_input if user_input.rstrip().endswith((":", "A:", "Answer:")) else user_input.rstrip() + " A:"
             reply = generate(prompt)
             print(f"  {reply}\n")
