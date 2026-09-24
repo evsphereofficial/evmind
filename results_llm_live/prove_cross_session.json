@@ -14,10 +14,10 @@
     },
     {
       "kind": "fact_color",
-      "expected": "emerald",
+      "expected": "Emerald",
       "generations": [
-        "emerald",
-        "emerald"
+        "Emerald",
+        "Emerald"
       ],
       "hits": 2,
       "total": 2,

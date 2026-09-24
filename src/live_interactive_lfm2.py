@@ -5,17 +5,16 @@ Full stack on the 1.2B base model:
   - NeuronRegister with protection capture (governor sees old-task territory)
   - TinyPerExpertGovernor with 11 features (8 local + 3 registry)
   - Hard expert isolation via SwiGLU w1/w3 hooks
-  - Laya-pattern InputRouter: structural detect -> intent + confidence
-    -> expert mask or "I don't know — teach me"
-  - Dynamic skill/fact/knowledge/unknown detection (not a closed fact set)
-  - Cross-session persistence via weight deltas + registry state
+  - LLM-native understanding: the base model classifies intent from natural
+    language (no hardcoded regex patterns) — teach/query/chat/unknown
+  - Content learning: teach from free text or a file (stories, docs, game lore)
+  - Cross-session persistence via sparse weight deltas + registry state
 
 Commands:
-  teach / learn prefixed, or natural teaching statements
-  queries route to learned experts; unknown -> ask to teach
-  facts          list learned items
-  experts        registry summary
-  save / quit
+  natural teaching statements, questions, chat — all understood by the LLM
+  learn file <path>       — ingest a text file as knowledge
+  learn this: <text>      — ingest pasted content
+  facts / experts / save / quit
 """
 
 from __future__ import annotations
@@ -331,59 +330,29 @@ def expected_match(text: str, answer: str, kind: str, value: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Laya-pattern InputRouter: structural detect + confidence + expert pick
+# LLM-native understanding (replaces regex intent patterns)
 # ---------------------------------------------------------------------------
 @dataclass
-class RouteResult:
+class Understanding:
     intent: str          # learn | query | chat | unknown
     kind: str | None     # fact_* | skill_code | knowledge | None
-    confidence: float
+    value: str | None    # extracted value / topic
     expert_id: int | None
-    value: str | None
+    confidence: float
     reason: str
 
 
+# Back-compat alias
+RouteResult = Understanding
+
+
 class InputRouter:
-    """Laya-inspired: decide intent BEFORE the heavy forward, gate on confidence.
+    """LLM-native router: the base model itself classifies intent.
 
-    Dynamic (not a closed fact list):
-      - structural signals classify teach-vs-ask-vs-chat
-      - support embeddings of learned experts pick WHO answers a query
-      - below threshold -> unknown -> 'teach me' flow
+    No hardcoded regex patterns for teaching — we ask the 1.2B model to
+    extract structured understanding from ANY natural phrase. Falls back
+    only for embedding-based expert matching (cheap, no generation).
     """
-
-    TEACH_PATTERNS = [
-        (re.compile(
-            r"\b(?:my\s+)?([a-z][a-z0-9_ ]{0,40}?)\s+is\s+([A-Za-z0-9][\w .'-]{0,60})",
-            re.I,
-        ), "fact"),
-        (re.compile(r"\bremember(?: that)?[:,]?\s*(.+)", re.I), "fact"),
-        (re.compile(r"\bnote(?: that)?[:,]?\s*(.+)", re.I), "fact"),
-        (re.compile(r"\bsave(?: this)?[:,]?\s*(.+)", re.I), "fact"),
-        (re.compile(r"\bcall me\s+(.+)", re.I), "fact"),
-        (re.compile(r"\bi(?:'m| am)\s+called\s+(.+)", re.I), "fact"),
-        (re.compile(r"\bi live in\s+(.+)", re.I), "fact"),
-        (re.compile(r"\bmy favou?rite colou?r is\s+(.+)", re.I), "fact"),
-        (re.compile(r"\bmy favou?rite food is\s+(.+)", re.I), "fact"),
-        (re.compile(r"\bhow (?:do i|to|would you|can i)\s+(.+?)(?:\?|$)", re.I), "skill"),
-        (re.compile(r"\bwrite(?: a)? (?:function|code|script|program)\s*(?:to|for)?\s*(.+?)(?:\?|$)", re.I), "skill"),
-        (re.compile(r"\bteach me(?: to| how)?\s+(.+?)(?:\?|$)", re.I), "skill"),
-        (re.compile(r"\blearn(?: how)? (?:to|to do)?\s+(.+?)(?:\?|$)", re.I), "skill"),
-        (re.compile(r"\bwhat is\s+(.+?)(?:\?|$)", re.I), "knowledge"),
-        (re.compile(r"\bexplain\s+(.+?)(?:\?|$)", re.I), "knowledge"),
-        (re.compile(r"\btell me about\s+(.+?)(?:\?|$)", re.I), "knowledge"),
-        (re.compile(r"\bwhat do you know about\s+(.+?)(?:\?|$)", re.I), "knowledge"),
-        (re.compile(r"\blearn(?: that)?[:,]?\s*(.+)", re.I), "knowledge"),
-    ]
-    QUERY_WORDS = re.compile(
-        r"\b(what|who|when|where|which|why|how much|how many|do you (?:know|remember)|"
-        r"can you (?:recall|remember)|remind me|quick —|what's|whats)\b",
-        re.I,
-    )
-    FACT_FIELD_HINTS = re.compile(
-        r"\b(name|color|colour|city|country|food|favorite|favourite|live|from|age|birthday)\b",
-        re.I,
-    )
 
     def __init__(self, hidden_size: int):
         self.hidden_size = hidden_size
@@ -400,14 +369,6 @@ class InputRouter:
             }
         )
         self.kind_counts[kind] = self.kind_counts.get(kind, 0) + 1
-
-    def text_centroid(self, tok, text: str) -> torch.Tensor:
-        """Mean token embedding — cheap support embedding (Laya: no extra model)."""
-        ids = tok(text, add_special_tokens=False, return_tensors="pt")["input_ids"][0]
-        if ids.numel() == 0:
-            ids = torch.tensor([tok.pad_token_id or 0])
-        # embedding table lives on model device; caller moves as needed
-        return ids
 
     @staticmethod
     def normalize_skill_value(value: str) -> str:
@@ -437,159 +398,146 @@ class InputRouter:
         top2 = float(sims_t.topk(2).values[-1]) if len(sims) > 1 else 0.0
         return self.experts[top]["expert_id"], top1, top1 - top2
 
-    def route(self, tok, model, text: str, learned_kinds: set[str]) -> RouteResult:
+    def understand(self, model, tok, text: str, learned_kinds: set[str]) -> "Understanding":
+        """Ask the base LLM to understand the message — no pattern matching.
+
+        Returns structured Understanding(intent, kind, value, ...).
+        One short generation (~0.3s on GPU).
+        """
         t = text.strip()
+        if not t:
+            return Understanding("chat", None, None, None, 1.0, "empty")
+
+        # Hard pre-rules: questions are NEVER learn (prevents "What is my name?"
+        # being mis-parsed as teach and overwriting the fact).
         low = t.lower()
-
-        # 1) explicit teach prefixes
-        for pref in ("teach ", "learn ", "remember ", "note "):
-            if low.startswith(pref):
-                rest = t[len(pref):].lstrip(":, ")
-                kind_hint, value = self._classify_teach(rest)
-                return RouteResult("learn", kind_hint, 1.0, None, value, f"prefix:{pref.strip()}")
-
-        # 2) QUERY path before teach patterns — "What is my name?" must not
-        #    be parsed as teach ("What is" + "my name").
-        is_query = bool(self.QUERY_WORDS.search(t)) or t.endswith("?")
-        if is_query:
-            eid, top1, margin = self.cosine_to_experts(model, tok, t)
-            conf = top1
-            matched_kind = None
-            # fact-field shortcut: "my name" / "favorite color" -> known fact kind
-            if self.FACT_FIELD_HINTS.search(t):
-                for kind in learned_kinds:
-                    if not kind.startswith("fact_"):
-                        continue
-                    field = kind.split("_", 1)[1]
-                    field_l = field.lower()
-                    if field_l in low or (field_l == "color" and ("colou" in low or "color" in low)) or (
-                        field_l == "name" and re.search(r"\bname\b", low)
-                    ) or (field_l == "city" and re.search(r"\b(live|from|city)\b", low)) or (
-                        field_l == "food" and re.search(r"\b(food|eat|like)\b", low)
-                    ):
-                        matched_kind = kind
-                        for e in self.experts:
-                            if e["kind"] == kind:
-                                eid = e["expert_id"]
-                                conf = max(conf, 0.85)
-                                break
-                        break
-
-            if matched_kind is not None and eid is not None:
-                return RouteResult(
-                    "query", matched_kind, conf, eid, None, "fact_field_match"
-                )
-
-            # Embedding anisotropy: unrelated English still scores ~0.5-0.6.
-            # Require BOTH strong top1 AND a clear margin over runner-up,
-            # otherwise we don't know it.
-            strong = top1 >= 0.75 and margin >= 0.10
-            # also check skill/knowledge value similarity against expert values
-            if not strong and self.experts:
-                # exact-ish value mention in query
-                for e in self.experts:
-                    if e["value"] and e["value"].lower() in low:
-                        eid = e["expert_id"]
-                        conf = 0.9
-                        matched_kind = e["kind"]
-                        strong = True
-                        break
-
-            if strong and eid is not None:
-                kind = matched_kind or next(
-                    (e["kind"] for e in self.experts if e["expert_id"] == eid), None
-                )
-                return RouteResult(
-                    "query", kind, conf, eid, None,
-                    f"support top1={top1:.2f} margin={margin:.2f}",
-                )
-
-            casual = re.match(
-                r"^\s*(how are you|who are you|what can you do|thanks|hello|hi)\b",
+        looks_like_question = (
+            t.endswith("?")
+            or bool(re.match(
+                r"^(what|who|when|where|why|which|how|do you|does|did|can you|"
+                r"could|would|should|is there|are there|tell me|remind me|explain)\b",
                 low,
-            )
-            if casual:
-                return RouteResult("chat", None, 0.9, None, None, "casual_question")
-            return RouteResult(
-                "unknown", None, conf, eid, None,
-                f"low_conf top1={top1:.2f} margin={margin:.2f}",
-            )
+            ))
+        )
 
-        # 3) teaching patterns (structured) — only non-questions
-        for rx, base_kind in self.TEACH_PATTERNS:
-            m = rx.search(t)
-            if not m:
+        kind_list = ", ".join(sorted(learned_kinds)) if learned_kinds else "(none yet)"
+        sys_msg = (
+            "You are a memory router for an AI that can learn facts from conversation.\n"
+            "Classify the user message into EXACTLY one line:\n"
+            "INTENT|kind|value\n\n"
+            "Intents:\n"
+            "  learn   — user is TELLING you something to remember (statement, not a question)\n"
+            "  query   — user is ASKING for something you might already know\n"
+            "  chat    — casual conversation, no memory action\n"
+            "  unknown — question about something you were never taught\n\n"
+            "Kinds for learn: fact_<field>, skill_code, knowledge\n"
+            f"Fact fields you already know: {kind_list}\n\n"
+            "STRICT RULES:\n"
+            "- If the message ends with ? it is NEVER learn.\n"
+            "- For learn, value = the thing to remember (short), NOT a pronoun like 'you/User'.\n"
+            "- 'my name is X' -> learn|fact_name|X  (X is the actual name)\n"
+            "- 'I love Y' -> learn|fact_interest|Y\n"
+            "- Statement of new info (game, news, definition) -> learn|knowledge|<short topic or fact>\n"
+            "- Question about known field -> query|fact_<field>|\n"
+            "- Question about unknown topic -> unknown|\n"
+            "- Greeting/smalltalk -> chat|\n\n"
+            "Examples:\n"
+            "my name is Rehan -> learn|fact_name|Rehan\n"
+            "by the way my favorite color is blue -> learn|fact_color|blue\n"
+            "I have a cat named Mochi -> learn|fact_cat|Mochi\n"
+            "I love collecting vintage cameras -> learn|fact_interest|vintage cameras\n"
+            "what is my name -> query|fact_name|\n"
+            "what do I love collecting -> query|fact_interest|\n"
+            "tell me about quantum entanglement -> unknown|\n"
+            "how do I reverse a string in Python -> learn|skill_code|reverse a string in Python\n"
+            "Resident Evil Requiem is a new survival horror game -> learn|knowledge|Resident Evil Requiem\n"
+            "hello how are you -> chat|\n"
+            "what is the capital of France -> chat|\n"
+        )
+        messages = [
+            {"role": "system", "content": sys_msg},
+            {"role": "user", "content": t},
+        ]
+        pid = encode_prompt(tok, messages).unsqueeze(0).to(DEVICE)
+        with torch.no_grad():
+            out = model.generate(
+                input_ids=pid,
+                attention_mask=torch.ones_like(pid),
+                max_new_tokens=32,
+                do_sample=False,
+                eos_token_id=tok.eos_token_id,
+                pad_token_id=tok.pad_token_id if tok.pad_token_id is not None else 0,
+            )
+        raw = tok.decode(out[0][pid.size(1):], skip_special_tokens=True).strip()
+        line = raw.split("\n")[0].strip()
+        # strip markdown/code fences if any
+        line = line.strip("`\"' *")
+        parts = [p.strip() for p in line.split("|")]
+        intent = parts[0].lower() if parts else "chat"
+        kind = parts[1] if len(parts) > 1 and parts[1] and parts[1].lower() not in ("none", "-", "") else None
+        value = "|".join(parts[2:]).strip() if len(parts) > 2 else None
+        if value and value.lower() in ("none", "-", ""):
+            value = None
+
+        if intent not in ("learn", "query", "chat", "unknown"):
+            # parse failed — fall back carefully
+            intent = "query" if looks_like_question else "chat"
+            kind = None
+            value = None
+
+        # Post-rule: questions never learn
+        if looks_like_question and intent == "learn":
+            intent = "query"
+            value = None  # don't carry a bogus extracted value into learn
+
+        # Post-rule: learn must have a real value, not pronouns
+        if intent == "learn":
+            if not value or value.lower() in ("you", "user", "me", "it", "this", "that", "something"):
+                if looks_like_question:
+                    intent = "query"
+                    value = None
+                else:
+                    # keep the raw statement as knowledge fallback
+                    kind = kind or "knowledge"
+                    value = t
+            if kind and kind.startswith("fact_") and not value:
+                value = kind.split("_", 1)[1]
+            if not kind:
+                kind = "knowledge"
+
+        conf = 0.95 if intent in ("learn", "query") else (0.4 if intent == "unknown" else 0.9)
+        return Understanding(intent, kind, value, None, conf, f"llm:{line[:60]}")
+
+    def match_expert(self, model, tok, text: str) -> tuple[int | None, str | None, float, float]:
+        """Match query to a known expert via embedding + token overlap."""
+        eid, top1, margin = self.cosine_to_experts(model, tok, text)
+        kind = None
+        low = text.lower()
+        q_tokens = set(re.findall(r"[a-z0-9]+", low))
+        best_overlap = 0.0
+        best_e = None
+        for e in self.experts:
+            if not e["value"]:
                 continue
-            if m.lastindex and m.lastindex >= 2 and base_kind == "fact":
-                field = m.group(1).strip()
-                value = m.group(2).strip()
-                kind = self._fact_kind(field, value)
-            else:
-                value = (m.group(1) if m.lastindex else m.group(0)).strip().rstrip(".?!")
-                if base_kind == "skill":
-                    kind = "skill_code"
-                elif base_kind == "knowledge":
-                    kind = "knowledge"
-                else:
-                    kind = self._fact_kind("", value)
-            if "?" in t and base_kind == "knowledge":
-                break  # should have been handled as query above
-            return RouteResult("learn", kind, 0.9, None, value, f"pattern:{base_kind}")
-
-        # 4) teaching statement without question mark ("my name is X")
-        for rx, base_kind in self.TEACH_PATTERNS:
-            m = rx.search(t)
-            if m and "?" not in t:
-                if m.lastindex and m.lastindex >= 2 and base_kind == "fact":
-                    field, value = m.group(1).strip(), m.group(2).strip()
-                    kind = self._fact_kind(field, value)
-                else:
-                    value = (m.group(1) if m.lastindex else m.group(0)).strip().rstrip(".?!")
-                    kind = (
-                        "skill_code"
-                        if base_kind == "skill"
-                        else "knowledge"
-                        if base_kind == "knowledge"
-                        else self._fact_kind("", value)
-                    )
-                return RouteResult("learn", kind, 0.85, None, value, "teach_statement")
-
-        # 5) default: casual chat
-        return RouteResult("chat", None, 0.9, None, None, "no_signal")
-
-    @staticmethod
-    def _is_teaching_statement(t: str) -> bool:
-        return bool(re.search(r"\b(my|i am|i'm|remember|note|save)\b", t, re.I)) and "?" not in t
-
-    @staticmethod
-    def _fact_kind(field: str, value: str) -> str:
-        f = field.lower()
-        v = value.lower()
-        if any(k in f for k in ("name", "called")):
-            return "fact_name"
-        if "col" in f:
-            return "fact_color"
-        if any(k in f for k in ("city", "live in", "from", "country")):
-            return "fact_city"
-        if "food" in f or "eat" in f or "like" in f:
-            return "fact_food"
-        if "age" in f:
-            return "fact_age"
-        if "birthday" in f:
-            return "fact_birthday"
-        # heuristic on value
-        if re.fullmatch(r"#[0-9a-f]{3,6}", v):
-            return "fact_color"
-        return "fact_general"
-
-    @staticmethod
-    def _classify_teach(rest: str) -> tuple[str, str]:
-        low = rest.lower()
-        if re.search(r"\bhow (?:do i|to)|\bwrite\b|\bcode\b|\bfunction\b", low):
-            return "skill_code", rest.strip()
-        if re.search(r"\bwhat is\b|\bexplain\b|\babout\b", low):
-            return "knowledge", rest.strip()
-        return "fact_general", rest.strip()
+            v_tokens = set(re.findall(r"[a-z0-9]+", e["value"].lower()))
+            if not v_tokens:
+                continue
+            overlap = len(v_tokens & q_tokens) / max(len(v_tokens), 1)
+            # also direct substring
+            if e["value"].lower() in low:
+                overlap = 1.0
+            if overlap > best_overlap:
+                best_overlap = overlap
+                best_e = e
+        # token overlap wins if strong (handles "Resident Evil Requiem" vs "re requiem")
+        if best_e is not None and best_overlap >= 0.5:
+            eid = best_e["expert_id"]
+            kind = best_e["kind"]
+            top1 = max(top1, 0.5 + 0.5 * best_overlap)
+            margin = max(margin, 0.15)
+        elif eid is not None:
+            kind = next((e["kind"] for e in self.experts if e["expert_id"] == eid), None)
+        return eid, kind, top1, margin
 
 
 # ---------------------------------------------------------------------------
@@ -1057,16 +1005,235 @@ def main():
         """Load sparse expert delta on top of base for recall."""
         apply_sparse_expert(model, base_snap, expert_states.get(eid) or {}, n_layers)
 
+    def learn_content(text: str, topic: str = "") -> str:
+        """Ingest free-form content (file body, pasted lore, docs).
+
+        Splits into sentences, builds QA pairs, trains ONE knowledge expert.
+        """
+        # clean + split
+        body = " ".join(text.split())
+        if not body:
+            return "Empty content — nothing to learn."
+        sentences = re.split(r"(?<=[.!?])\s+", body)
+        sentences = [s.strip() for s in sentences if len(s.strip()) > 10][:12]
+        if not sentences:
+            sentences = [body[:300]]
+        topic = topic or sentences[0][:60]
+
+        # QA: ask about topic / sentence fragments — SHORT answers for learnability
+        qa = []
+        for s in sentences:
+            # use first clause as answer (shorter -> easier to lock in)
+            short_a = s.split(".")[0][:160].strip()
+            qa.append(([{"role": "user", "content": f"What do you know about {topic}?"}], f" {short_a}"))
+            # key phrase from sentence
+            clause = s.split(",")[0].split(".")[0][:80]
+            if clause and clause.lower() != topic.lower():
+                qa.append(([{"role": "user", "content": f"Tell me about {clause}."}], f" {short_a}"))
+        # summary pair — short
+        summary = ". ".join(s.split(".")[0] for s in sentences[:2])[:300]
+        qa.append(([{"role": "user", "content": f"Summarize {topic}."}], f" {summary}"))
+        # topic -> first sentence
+        qa.append(([{"role": "user", "content": f"What is {topic}?"}], f" {sentences[0][:200]}"))
+        qa.append(([{"role": "user", "content": f"Tell me about {topic}."}], f" {sentences[0][:200]}"))
+        # dedupe by answer
+        seen = set()
+        qa_u = []
+        for msgs, ans in qa:
+            k = ans[:80]
+            if k not in seen:
+                seen.add(k)
+                qa_u.append((msgs, ans))
+        qa = qa_u[:16]
+
+        probes = [
+            ([{"role": "user", "content": f"What is {topic}?"}], f" {sentences[0][:200]}"),
+            ([{"role": "user", "content": f"Tell me about {topic}."}], f" {sentences[0][:200]}"),
+            ([{"role": "user", "content": f"Remind me about {topic}."}], f" {summary[:200]}"),
+        ]
+
+        answer = f" {sentences[0][:200]}"
+        ans_tok = len(encode_answer(tok, answer))
+        val_tok = len(encode_answer(tok, " " + topic))
+        n0 = predict_neurons_v4("knowledge", ans_tok, val_tok)
+        # content is heavier — bump grid
+        n0 = next_grid_step(max(n0, 256))
+
+        key = f"content:{topic.lower()[:80]}"
+        if key in items:
+            old_eid = items[key]["expert_id"]
+            if old_eid in masks_by_expert:
+                register.deallocate(masks_by_expert[old_eid], old_eid)
+            expert_states.pop(old_eid, None)
+            governors.pop(old_eid, None)
+            masks_by_expert.pop(old_eid, None)
+            input_router.experts = [
+                e for e in input_router.experts if e["expert_id"] != old_eid
+            ]
+            del items[key]
+
+        nonlocal next_eid, router_net
+        eid = next_eid
+        next_eid += 1
+        gov = TinyPerExpertGovernor(hidden=12).to(DEVICE)
+        restore_ffn(model, base_snap)
+
+        print(f"\n[learn_content] topic={topic!r} sentences={len(sentences)} V4_n={n0}")
+        n = n0
+        ok = False
+        loss = None
+        masks = None
+        for attempt in range(MAX_ADAPTIVE_RETRIES):
+            masks, used = allocate_free(register, n_layers, inter, n, eid, DEVICE)
+            t0 = time.time()
+            loss = train_expert(model, tok, qa, masks, gov, register, DEVICE, epochs=max(40, TRAIN_EPOCHS))
+            acc = probe_hit_rate(model, tok, probes, answer, "knowledge", topic, masks)
+            dt = time.time() - t0
+            print(f"  attempt {attempt+1}: n={used} loss={loss:.4f} probe={acc:.0%} ({dt:.1f}s)")
+            if acc >= 0.34 or (loss < 2.0 and acc > 0) or attempt >= 2:
+                ok = True
+                break
+            register.deallocate(masks, eid)
+            register.allocations = [a for a in register.allocations if a.get("expert_id") != eid]
+            n = next_grid_step(n)
+            restore_ffn(model, base_snap)
+
+        if not ok:
+            restore_ffn(model, base_snap)
+            return f"Could not stabilize content for '{topic}' (loss={loss})."
+
+        with torch.no_grad():
+            w_list = [model.model.layers[li].feed_forward.w1.weight.detach() for li in range(n_layers)]
+            g_list = [
+                (model.model.layers[li].feed_forward.w1.weight.detach()
+                 - base_snap[f"{li}.w1"].to(DEVICE)).abs()
+                for li in range(n_layers)
+            ]
+            register.capture_protection(masks, w_list, g_list)
+
+        state = extract_sparse_delta(model, base_snap, masks, n_layers)
+        expert_states[eid] = state
+        masks_by_expert[eid] = masks
+        governors[eid] = gov
+
+        probe_text = probes[0][0][0]["content"]
+        with torch.no_grad():
+            ids = encode_prompt(tok, [{"role": "user", "content": probe_text}]).to(DEVICE)
+            centroid = model.model.embed_tokens(ids).mean(0).cpu()
+        input_router.register_expert("knowledge", topic, eid, centroid)
+
+        if router_net.num_experts <= eid:
+            router_net = expand_router(router_net, eid + 1, DEVICE)
+
+        items[key] = {
+            "kind": "knowledge",
+            "value": topic,
+            "expert_id": eid,
+            "n_neurons": int(sum(counts_from_masks(masks))),
+            "final_loss": float(loss),
+            "ans_tokens": ans_tok,
+            "val_tokens": val_tok,
+            "probe_text": probe_text,
+            "governor": {k: v.cpu() for k, v in gov.state_dict().items()},
+            "learned_at": time.time(),
+            "content_preview": sentences[0][:200],
+            "n_sentences": len(sentences),
+        }
+        save()
+        restore_ffn(model, base_snap)
+        return (
+            f"Learned content about {topic!r}: {len(sentences)} sentences, "
+            f"{items[key]['n_neurons']} neurons, loss={loss:.4f}. "
+            f"Ask me anything about it."
+        )
+
+    def learn_file(path_str: str) -> str:
+        p = Path(path_str.strip().strip("'\""))
+        if not p.exists():
+            # try relative to cwd / common dirs
+            for cand in [Path.cwd() / p, Path("/mnt/c") / p, Path("/mnt/d") / p]:
+                if cand.exists():
+                    p = cand
+                    break
+            else:
+                return f"File not found: {path_str}"
+        try:
+            text = p.read_text(encoding="utf-8", errors="replace")
+        except Exception as e:
+            return f"Could not read {p}: {e}"
+        if len(text) > 8000:
+            text = text[:8000]
+        # topic from first meaningful line, not just filename
+        first_line = next((ln.strip() for ln in text.splitlines() if len(ln.strip()) > 20), "")
+        if first_line:
+            # take leading proper-noun-ish phrase (first 6-8 words)
+            words = first_line.split()[:8]
+            topic = " ".join(words).rstrip(".:,-")
+            # if it starts with a stopword, trim
+            while topic and topic.split()[0].lower() in ("the", "a", "an", "this", "that", "it"):
+                topic = " ".join(topic.split()[1:])
+        else:
+            topic = p.stem.replace("_", " ").replace("-", " ")
+        return learn_content(text, topic=topic)
+
     def query(text: str) -> str:
         learned_kinds = {m["kind"] for m in items.values()}
-        route = input_router.route(tok, model, text, learned_kinds)
+
+        # Fast path: if question about a known fact field, skip LLM classify
+        low = text.lower().strip()
+        fact_field_hit = None
+        if "?" in text or re.match(r"^(what|who|tell me|remind|do you|can you)", low):
+            for kind in learned_kinds:
+                if not kind.startswith("fact_"):
+                    continue
+                field = kind.split("_", 1)[1].lower()
+                # field word appears in query ("name" in "what is my name")
+                if field and field in low:
+                    for e in input_router.experts:
+                        if e["kind"] == kind:
+                            fact_field_hit = (kind, e["expert_id"], e["value"])
+                            break
+                if fact_field_hit:
+                    break
+
+        if fact_field_hit:
+            kind, eid, value = fact_field_hit
+            route = Understanding("query", kind, value, eid, 0.9, "fact_field_fastpath")
+        else:
+            route = input_router.understand(model, tok, text, learned_kinds)
+            # for query intent, match expert by embedding + token overlap
+            if route.intent == "query":
+                eid, ekind, top1, margin = input_router.match_expert(model, tok, text)
+                if eid is not None and (top1 >= 0.50 or (route.kind and ekind == route.kind)):
+                    route.expert_id = eid
+                    route.confidence = max(route.confidence, top1)
+                    if not route.kind:
+                        route.kind = ekind
+                # fact-field: LLM said query|fact_name| but embedding weak — still try kind match
+                if route.expert_id is None and route.kind:
+                    for e in input_router.experts:
+                        if e["kind"] == route.kind:
+                            route.expert_id = e["expert_id"]
+                            route.confidence = max(route.confidence, 0.7)
+                            break
+                if route.expert_id is None:
+                    route = Understanding(
+                        "unknown", route.kind, route.value, None, 0.4,
+                        f"query_no_expert top1={top1:.2f}",
+                    )
+
         print(
-            f"  route: intent={route.intent} kind={route.kind} "
+            f"  understand: intent={route.intent} kind={route.kind} "
             f"conf={route.confidence:.2f} expert={route.expert_id} ({route.reason})"
         )
 
         if route.intent == "learn":
-            return learn(route.kind or "fact_general", route.value or text, text)
+            k = route.kind or "knowledge"
+            v = route.value or text
+            # long free-text learn -> content mode (multi-QA)
+            if k == "knowledge" and len(v) > 200:
+                return learn_content(v, topic=v[:60])
+            return learn(k, v, text)
 
         if route.intent == "query" and route.expert_id is not None:
             apply_expert(route.expert_id)
@@ -1214,16 +1381,22 @@ def main():
             print(f"Saved -> {CHECKPOINT}")
             continue
 
-        # direct teach shortcuts
-        m = re.match(r"^(?:teach|learn)\s+(?:me\s+)?(.+)$", raw, re.I)
-        if m and not raw.lower().startswith("what"):
-            rest = m.group(1)
-            kind_hint, value = InputRouter._classify_teach(rest)
-            print(query(f"teach {value}" if kind_hint != "fact_general" else raw))
-            # also ensure kind
-            if kind_hint != "fact_general" and f"{kind_hint}:{value.lower()}" not in items:
-                # learn() already ran via route; skip
-                pass
+        # file / content learning shortcuts
+        m = re.match(r"^(?:learn|teach|ingest)\s+(?:me\s+)?(?:from\s+|file\s+)?(.+)$", raw, re.I)
+        if m:
+            rest = m.group(1).strip()
+            # looks like a path?
+            if re.search(r"[\w./\\-]+\.(txt|md|py|json|csv|log)$", rest, re.I) or Path(rest).exists():
+                print(f"Assistant: {learn_file(rest)}")
+                continue
+            # "learn this: ..." long content
+            m2 = re.match(r"^(?:this|content|text)\s*:\s*(.+)$", rest, re.I | re.S)
+            if m2 and len(m2.group(1)) > 100:
+                print(f"Assistant: {learn_content(m2.group(1), topic=m2.group(1)[:50])}")
+                continue
+            # otherwise fall through to LLM understand (handles "learn python", "teach me X")
+            # but strip the prefix so LLM sees the payload
+            print(f"Assistant: {query(m2.group(1) if m2 else rest)}")
             continue
 
         print(f"Assistant: {query(raw)}")

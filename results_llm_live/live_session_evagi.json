@@ -16,121 +16,13 @@
     },
     {
       "turn": 1,
-      "user": "Hello",
-      "kind": "free",
-      "expert": 0,
-      "generation": "!!!!!!!!!!!!!!!!!!!!!!!!",
-      "accuracies": {
-        "sentiment": 100.0,
-        "spelling": 100.0,
-        "capital": 100.0,
-        "plural": 100.0,
-        "antonym": 100.0
-      }
-    },
-    {
-      "turn": 2,
-      "user": "My name is rehan",
-      "kind": "teach",
-      "fact": {
-        "kind": "fact_name",
-        "value": "rehan",
-        "expert_id": 5,
-        "recall": {
-          "expert": 5,
-          "support_pick": 5,
-          "support_nll": [
-            3.7695,
-            6.0515,
-            8.6632,
-            7.0087,
-            6.3212,
-            0.0012
-          ],
-          "gen_hits": 3,
-          "gen_total": 3,
-          "gen_acc": 100.0,
-          "tf_first_tok": 3,
-          "tf_total": 3,
-          "generations": [
-            "rehan",
-            "rehan",
-            "rehan"
-          ]
-        }
-      },
-      "accuracies": {
-        "sentiment": 100.0,
-        "spelling": 100.0,
-        "capital": 100.0,
-        "plural": 100.0,
-        "antonym": 100.0
-      }
-    },
-    {
-      "turn": 3,
-      "user": "Do you know paris has Eifel tower>",
-      "kind": "free",
-      "expert": 2,
-      "generation": "a a a a a a a a,,,,,,,,,,,,,,,,",
-      "accuracies": {
-        "sentiment": 100.0,
-        "spelling": 100.0,
-        "capital": 100.0,
-        "plural": 100.0,
-        "antonym": 100.0
-      }
-    },
-    {
-      "turn": 4,
-      "user": "what is your name?",
-      "kind": "ask_fact",
-      "expert": 0,
-      "generation": "mom!!!!!!!!!!!",
-      "prompt": "what is your name? A:",
-      "accuracies": {
-        "sentiment": 100.0,
-        "spelling": 100.0,
-        "capital": 100.0,
-        "plural": 100.0,
-        "antonym": 100.0
-      }
-    },
-    {
-      "turn": 5,
-      "user": "Where is Eifel tower?",
-      "kind": "free",
-      "expert": 4,
-      "generation": "!!!!!!!!!!!!!!!!!!!!!!!!",
-      "accuracies": {
-        "sentiment": 100.0,
-        "spelling": 100.0,
-        "capital": 100.0,
-        "plural": 100.0,
-        "antonym": 100.0
-      }
-    },
-    {
-      "turn": 6,
-      "user": "Eifel tower is in paris",
-      "kind": "free",
-      "expert": 5,
-      "generation": "!!!!!!!!!!!!!!!!!!!!!!!!",
-      "accuracies": {
-        "sentiment": 100.0,
-        "spelling": 100.0,
-        "capital": 100.0,
-        "plural": 100.0,
-        "antonym": 100.0
-      }
-    },
-    {
-      "turn": 7,
-      "user": "Whats my name",
+      "user": "Whatwhat is my name?",
       "kind": "ask_fact",
       "expert": 5,
-      "generation": "rehan",
-      "prompt": "Whats my name A:",
+      "generation": "Rehan",
+      "prompt": "Whatwhat is my name? A:",
+      "route": "fact_name",
+      "hit": 1,
       "accuracies": {
         "sentiment": 100.0,
         "spelling": 100.0,
@@ -141,48 +33,6 @@
     }
   ],
   "accuracy_matrix": [
-    [
-      100.0,
-      100.0,
-      100.0,
-      100.0,
-      100.0
-    ],
-    [
-      100.0,
-      100.0,
-      100.0,
-      100.0,
-      100.0
-    ],
-    [
-      100.0,
-      100.0,
-      100.0,
-      100.0,
-      100.0
-    ],
-    [
-      100.0,
-      100.0,
-      100.0,
-      100.0,
-      100.0
-    ],
-    [
-      100.0,
-      100.0,
-      100.0,
-      100.0,
-      100.0
-    ],
-    [
-      100.0,
-      100.0,
-      100.0,
-      100.0,
-      100.0
-    ],
     [
       100.0,
       100.0,
@@ -230,6 +80,11 @@
     }
   },
   "fact_index": {
-    "fact_name": 5
+    "fact_name": 5,
+    "fact_color": 6
+  },
+  "fact_values": {
+    "fact_name": "Rehan",
+    "fact_color": "emerald"
   }
 }
