@@ -1,0 +1,112 @@
+{
+  "grid": [
+    64,
+    96,
+    128,
+    192,
+    256,
+    384,
+    512,
+    768,
+    1024,
+    1536,
+    2048,
+    3072,
+    4096,
+    6144,
+    8192
+  ],
+  "results": [
+    {
+      "n_neurons": 256,
+      "loss": 0.0369,
+      "probe_acc": 1.0,
+      "ok": true,
+      "kind": "skill_code",
+      "value": "sort a list in python",
+      "ans_tokens": 19
+    },
+    {
+      "n_neurons": 512,
+      "loss": 0.2889,
+      "probe_acc": 1.0,
+      "ok": true,
+      "kind": "skill_code",
+      "value": "reverse a string in python",
+      "ans_tokens": 22
+    },
+    {
+      "n_neurons": 768,
+      "loss": 0.1544,
+      "probe_acc": 1.0,
+      "ok": true,
+      "kind": "skill_code",
+      "value": "read a file in python",
+      "ans_tokens": 27
+    },
+    {
+      "n_neurons": 4096,
+      "loss": 0.0144,
+      "probe_acc": 1.0,
+      "ok": true,
+      "kind": "skill_code",
+      "value": "fizzbuzz in python",
+      "ans_tokens": 77
+    },
+    {
+      "n_neurons": 3072,
+      "loss": 0.0307,
+      "probe_acc": 1.0,
+      "ok": true,
+      "kind": "knowledge",
+      "value": "the capital of france",
+      "ans_tokens": 25
+    },
+    {
+      "n_neurons": 768,
+      "loss": 0.0288,
+      "probe_acc": 1.0,
+      "ok": true,
+      "kind": "knowledge",
+      "value": "how photosynthesis works",
+      "ans_tokens": 28
+    },
+    {
+      "n_neurons": 1536,
+      "loss": 0.065,
+      "probe_acc": 1.0,
+      "ok": true,
+      "kind": "skill_code",
+      "value": "check if a number is prime in python",
+      "ans_tokens": 20
+    },
+    {
+      "n_neurons": 384,
+      "loss": 0.0986,
+      "probe_acc": 1.0,
+      "ok": true,
+      "kind": "skill_code",
+      "value": "merge two dictionaries in python",
+      "ans_tokens": 18
+    },
+    {
+      "n_neurons": 64,
+      "loss": 0.045,
+      "probe_acc": 1.0,
+      "ok": true,
+      "kind": "knowledge",
+      "value": "what gravity is",
+      "ans_tokens": 9
+    },
+    {
+      "n_neurons": 256,
+      "loss": 0.388,
+      "probe_acc": 1.0,
+      "ok": true,
+      "kind": "knowledge",
+      "value": "why the sky is blue",
+      "ans_tokens": 11
+    }
+  ],
+  "wall_s": 561.1028671264648
+}

@@ -142,6 +142,79 @@ def predict_required_weights(
     return max(10, k_alloc)
 
 
+# -- Equation V4: direct neuron allocation (calibrated on LFM2.5-1.2B) ------
+# Calibration: binary-search min neurons for probe success (48 items, 100% pass).
+#   src/calibrate_v4_lfm2.py -> calibrate_v4_lfm2_results.json / calibrate_v4_skills.json
+#
+# Two regimes measured:
+#   FACTS (key-value binding): almost free — 4 neurons for val_tokens<=4,
+#     64 for val_tokens 5-8. The model already knows the tokens; we only
+#     bind prompt -> value.
+#   SKILLS / KNOWLEDGE (generative): ans_tokens=9..77 -> 64..4096 neurons.
+#     Linear fit n ≈ 58.4*ans_tok - 323 (R²=0.675); high variance from
+#     answer entropy, so headroom ×2.0 + round up to power-of-two grid.
+#
+# LFM2.5: 16 layers x 8192 inter = 131,072 neurons; w/neuron = 6144.
+#
+# Design: lean prior + adaptive doubling at train time.
+#   predict_neurons_v4 returns a LOW estimate (minimize waste);
+#   if training fails to converge, caller doubles (see adaptive_neuron_count).
+#   Guarantees success without paying 6x average over-allocation.
+V4_NEURON_GRID: tuple[int, ...] = (
+    4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384,
+)
+V4_FACT_BASE = 4           # measured floor for key-value facts
+V4_FACT_LONG = 64          # val_tokens > threshold (high-entropy values)
+V4_FACT_LONG_THRESHOLD = 6 # spaghetti(8)/macaroni(5) -> 64; most <=5 stay at 4
+V4_FACT_HEADROOM = 1.0     # facts are nearly free; adaptive handles rare misses
+V4_SKILL_SLOPE = 58.4      # neurons per answer token (linear fit R²=0.675)
+V4_SKILL_INTERCEPT = -323.0
+V4_SKILL_MIN = 64
+V4_SKILL_HEADROOM = 1.25   # lean; adaptive doubles when loss stays high
+
+
+def _ceil_grid(n: float, grid: tuple[int, ...] = V4_NEURON_GRID) -> int:
+    """Round n up to the next value in the neuron grid (capped at grid max)."""
+    for g in grid:
+        if n <= g:
+            return g
+    return grid[-1]
+
+
+def predict_neurons_v4(
+    task_kind: str,
+    ans_tokens: int = 0,
+    val_tokens: int = 0,
+) -> int:
+    """Equation V4 (lean prior): expert neurons for a live-learning item.
+
+    task_kind: 'fact_*' (binding) or 'skill_*'/'knowledge'/other (generative).
+    ans_tokens: token count of the target answer the model must generate.
+    val_tokens: token count of the fact value only (e.g. ' alice').
+
+    Returns a grid value — a PRIOR, not a guarantee for high-entropy
+    generative answers. Use next_grid_step() to double on training failure.
+    """
+    if task_kind.startswith("fact_"):
+        base = (
+            V4_FACT_LONG
+            if val_tokens > V4_FACT_LONG_THRESHOLD
+            else V4_FACT_BASE
+        )
+        return _ceil_grid(base * V4_FACT_HEADROOM)
+    est = V4_SKILL_INTERCEPT + V4_SKILL_SLOPE * max(ans_tokens, 1)
+    est = max(float(V4_SKILL_MIN), est)
+    return _ceil_grid(est * V4_SKILL_HEADROOM)
+
+
+def next_grid_step(n: int, grid: tuple[int, ...] = V4_NEURON_GRID) -> int:
+    """Smallest grid value strictly greater than n (adaptive doubling step)."""
+    for g in grid:
+        if g > n:
+            return g
+    return grid[-1]
+
+
 def compute_footprint(
     params_flat: torch.Tensor,
     grads_flat: torch.Tensor,

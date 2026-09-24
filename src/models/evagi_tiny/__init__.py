@@ -22,6 +22,7 @@ class EvagiTinyConfig:
     # Expert allocation per layer
     expert_fracs: dict = None  # expert_id -> fraction of FFN neurons
     dropout: float = 0.0
+    inter_size: int = 0  # FFN intermediate size; 0 = auto n_embd * 4
 
     def __post_init__(self):
         if self.expert_fracs is None:
@@ -29,7 +30,8 @@ class EvagiTinyConfig:
             # Expert 0: general (40%), Expert 1: facts (20%), Expert 2: reasoning (20%), Expert 3: reserved (20%)
             self.expert_fracs = {0: 0.4, 1: 0.2, 2: 0.2, 3: 0.2}
         self.n_embd = (self.n_embd // self.n_head) * self.n_head  # ensure divisible
-        self.inter_size = self.n_embd * 4  # FFN intermediate size
+        if not self.inter_size:
+            self.inter_size = self.n_embd * 4  # FFN intermediate size
 
 
 class CausalSelfAttention(nn.Module):

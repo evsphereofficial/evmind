@@ -58,7 +58,13 @@ def predict_neurons(task_name: str, n_layers: int, neuron_div: int = DEFAULT_NEU
 # Register: per-layer occupancy over the FFN neuron pool
 # ---------------------------------------------------------------------------
 class NeuronRegister:
-    """Tracks which FFN neurons are owned by which expert/task."""
+    """Tracks which FFN neurons are owned by which expert/task.
+
+    Extended with per-neuron protection scores captured after each task
+    (|grad|*|weight| footprint on owned neurons). The governor reads these
+    via get_protection_feats() so it can see what the network already
+    learned and defend old-task territory.
+    """
 
     def __init__(self, inters: list[int], device: torch.device):
         self.inters = list(inters)
@@ -72,6 +78,11 @@ class NeuronRegister:
             for inter in inters
         ]
         self.allocations: list[dict] = []
+        # per-neuron protection from COMPLETED tasks (max footprint seen)
+        self.protection = [
+            torch.zeros(inter, device=device) for inter in inters
+        ]
+        self.n_captured: int = 0
 
     def allocate(self, task_name: str, counts: list[int], expert_id: int) -> list[torch.Tensor]:
         """Carve out free neurons per layer; returns per-layer Bool masks."""
@@ -93,6 +104,58 @@ class NeuronRegister:
         )
         return masks
 
+    def deallocate(self, masks: list[torch.Tensor], expert_id: int) -> None:
+        """Free neurons back (adaptive-retry: failed allocation attempt)."""
+        for li, m in enumerate(masks):
+            self.occupied[li][m] = False
+            self.ownership[li][m & (self.ownership[li] == expert_id)] = -1
+        self.allocations = [
+            a for a in self.allocations if a.get("expert_id") != expert_id
+        ]
+
+    def capture_protection(
+        self,
+        masks: list[torch.Tensor],
+        weights: list[torch.Tensor],
+        grads: list[torch.Tensor | None],
+    ) -> None:
+        """After learning a task, record |grad|*|weight| footprint on its neurons.
+
+        weights/grads: per-layer c_fc.weight (inter, hidden). Protection is
+        per-neuron (mean over hidden). Old-task max is preserved (never
+        weakened by later captures on different neurons; same-neuron
+        recapture takes max so protection is monotonic).
+        """
+        for li, m in enumerate(masks):
+            if grads[li] is None:
+                continue
+            fp = (grads[li].abs() * weights[li].abs()).mean(dim=-1)  # (inter,)
+            # only owned neurons carry this task's protection
+            fp = fp * m.to(fp.dtype)
+            self.protection[li] = torch.maximum(self.protection[li], fp.detach())
+        self.n_captured += 1
+
+    def get_protection_feats(self, mask: torch.Tensor, layer_idx: int) -> torch.Tensor:
+        """(N, 3) registry-derived features for owned neurons under mask.
+
+        Features:
+          0. protection_norm: log1p(prot) scaled to [0,1] vs layer max
+          1. prior_owned: 1 if this neuron carries protection from an
+             already-completed task (0 for freshly allocated neurons)
+          2. layer_occupancy: fraction of this layer already occupied
+             (context pressure — many old neurons => be conservative)
+        """
+        idx = torch.where(mask)[0]
+        if idx.numel() == 0:
+            return torch.zeros(0, 3, device=mask.device)
+        prot = self.protection[layer_idx][idx]
+        p_log = torch.log1p(prot)
+        p_max = torch.log1p(self.protection[layer_idx]).max().detach()
+        p_norm = p_log / p_max.clamp(min=1e-6)
+        prior = (prot > 0).float()
+        occ = self.occupied[layer_idx].float().mean().expand_as(p_norm)
+        return torch.stack([p_norm, prior, occ], dim=-1)
+
     def total_occupied(self) -> int:
         return int(sum(o.sum().item() for o in self.occupied))
 
@@ -104,6 +167,7 @@ class NeuronRegister:
             "pool": self.total_pool(),
             "occupied": self.total_occupied(),
             "allocations": self.allocations,
+            "captured_tasks": self.n_captured,
         }
 
 
@@ -213,15 +277,25 @@ def freeze_all_but_ffn(model: nn.Module, layers: nn.ModuleList) -> None:
 class TinyPerExpertGovernor(nn.Module):
     """Tiny gate net: per-neuron features -> sigmoid plasticity in (0,1].
 
-    Amortized like HRMIntentGovernor: shared 8->hidden->1 MLP, so the governor
-    stays ~100-300 params while controlling all of its expert's neurons.
-    Init bias high so gates start ~open (1.0); light L1 encourages selectivity.
+    Amortized like HRMIntentGovernor: shared (8+3)->hidden->1 MLP, so the
+    governor stays ~100-400 params while controlling all of its expert's
+    neurons. Init bias high so gates start ~open (1.0); light L1 encourages
+    selectivity.
+
+    Input features (11 total):
+      0-7: neuron-local (weight/grad stats, position, layer, owned)
+      8-10: registry-derived (protection_norm, prior_owned, layer_occupancy)
+            — lets the governor SEE what the network already learned and
+            keep gates closed on old-task territory when appropriate.
     """
+
+    INPUT_DIM = 11
+    REGISTRY_DIM = 3
 
     def __init__(self, hidden: int = 12):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Linear(8, hidden),
+            nn.Linear(self.INPUT_DIM, hidden),
             nn.ReLU(),
             nn.Linear(hidden, 1),
         )
@@ -230,7 +304,16 @@ class TinyPerExpertGovernor(nn.Module):
         nn.init.constant_(self.net[-1].bias, 4.0)  # sigmoid(4)≈0.982
 
     def forward(self, feats: torch.Tensor) -> torch.Tensor:
-        """feats (N, 8) -> gates (N,) in (0,1)."""
+        """feats (N, 11) -> gates (N,) in (0,1)."""
+        if feats.size(-1) != self.INPUT_DIM:
+            # backwards compat: pad missing registry features with zeros
+            pad = self.INPUT_DIM - feats.size(-1)
+            if pad > 0:
+                feats = torch.cat(
+                    [feats, feats.new_zeros(feats.size(0), pad)], dim=-1
+                )
+            else:
+                feats = feats[:, : self.INPUT_DIM]
         return torch.sigmoid(self.net(feats).squeeze(-1))
 
 
@@ -240,15 +323,18 @@ def neuron_features(
     mask: torch.Tensor,
     layer_idx: int,
     n_layers: int,
+    registry_feats: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Build (N, 8) features for governor over owned neurons.
+    """Build (N, 11) features for governor over owned neurons.
 
     weights/grads: c_fc.weight (inter, hidden) — row i is neuron i.
+    registry_feats: optional (N, 3) from NeuronRegister.get_protection_feats.
     Returns (feats, idx) where idx are owned neuron indices.
     """
     idx = torch.where(mask)[0]
+    n_feat = TinyPerExpertGovernor.INPUT_DIM
     if idx.numel() == 0:
-        return torch.zeros(0, 8, device=mask.device), idx
+        return torch.zeros(0, n_feat, device=mask.device), idx
     w_rows = weights[idx]  # (N, hidden)
     if grads is not None:
         g_rows = grads[idx]
@@ -258,7 +344,7 @@ def neuron_features(
     pos = idx.float() / max(n - 1, 1)
     layer_f = torch.full_like(pos, layer_idx / max(n_layers - 1, 1))
     owned = torch.ones_like(pos)
-    feats = torch.stack(
+    local = torch.stack(
         [
             torch.log1p(w_rows.abs().mean(dim=-1)),
             torch.log1p(g_rows.abs().mean(dim=-1)),
@@ -271,6 +357,13 @@ def neuron_features(
         ],
         dim=-1,
     )
+    if registry_feats is not None and registry_feats.size(0) == idx.numel():
+        feats = torch.cat([local, registry_feats.to(local.dtype)], dim=-1)
+    else:
+        feats = torch.cat(
+            [local, local.new_zeros(local.size(0), TinyPerExpertGovernor.REGISTRY_DIM)],
+            dim=-1,
+        )
     return feats, idx
 
 
@@ -363,11 +456,14 @@ def train_fact_expert(
     max_length: int,
     epochs: int | None = None,
     lr: float | None = None,
+    register: "NeuronRegister | None" = None,
 ) -> dict:
     """Mid-chat fact install: full EvAGI stack on free-text QA.
 
-    Equation V2 already chose `masks` via the caller (Register.allocate).
-    Here: TinyPerExpertGovernor gates + hard grad mask + HRM router step.
+    Equation V4 chose `masks` via the caller (Register.allocate).
+    Here: TinyPerExpertGovernor gates (registry-aware) + hard grad mask +
+    HRM router step. If `register` is given, governor features include
+    protection/prior_owned/layer_occupancy from completed tasks.
     """
     from torch.utils.data import DataLoader, TensorDataset
 
@@ -408,7 +504,13 @@ def train_fact_expert(
                 m = masks[li]
                 w = layer.mlp.c_fc.weight
                 g = w.grad if w.grad is not None else torch.zeros_like(w)
-                feats, idx = neuron_features(w.detach(), g.detach(), m, li, len(layers))
+                reg_feats = None
+                if register is not None:
+                    reg_feats = register.get_protection_feats(m, li)
+                feats, idx = neuron_features(
+                    w.detach(), g.detach(), m, li, len(layers),
+                    registry_feats=reg_feats,
+                )
                 if idx.numel() == 0:
                     gates.append(torch.zeros(w.shape[0], device=device))
                     continue
@@ -483,6 +585,17 @@ def train_fact_expert(
         history.append(rec)
         print(f"    live epoch {epoch + 1}/{_epochs} loss={rec['loss']:.4f} "
               f"router_loss={rec['router_loss']:.3f}")
+
+    # record footprint so FUTURE governors see this task's territory
+    if register is not None:
+        with torch.no_grad():
+            w_list, g_list, m_list = [], [], []
+            for li, layer in enumerate(layers):
+                w = layer.mlp.c_fc.weight
+                w_list.append(w.detach())
+                g_list.append(w.grad.detach() if w.grad is not None else None)
+                m_list.append(masks[li])
+            register.capture_protection(m_list, w_list, g_list)
 
     for p in governor.parameters():
         p.requires_grad_(False)
