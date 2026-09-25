@@ -4,10 +4,10 @@ set -e
 cd "$(dirname "$0")"
 
 CKPT="models/LFM2.5-1.2B-Instruct/evagi_live.pt"
-# Warn if checkpoint looks like old dense format
+# Warn if checkpoint looks like old dense format (~3GB dense vs ~50MB sparse content)
 if [ -f "$CKPT" ]; then
   SZ=$(stat -c%s "$CKPT")
-  if [ "$SZ" -gt 10485760 ]; then
+  if [ "$SZ" -gt 524288000 ]; then
     echo "WARNING: $CKPT is $((SZ/1024/1024))MB — likely old dense format, deleting"
     rm -f "$CKPT"
   fi
