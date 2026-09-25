@@ -1,6 +1,6 @@
 # EvAGI: Hierarchical Neuron-Isolated Continual Learning for Frontier Models on Consumer Hardware
 
-**Technical Report — 2026-09-25 (rev. C — instant learn-turn: TF probe gate + adapter capacity law)**  
+**Technical Report — 2026-09-25 (rev. D — System-1 decision classifier: regex/prompt routing removed)**  
 **Status:** Architecture mapped, core claims proven on 17K → 8.3M → 1.2B scales; live CLI green on RTX 4070  
 **Goal:** A frontier-capable model that learns live, runs on consumer hardware (12 GB VRAM / 16 GB RAM), and suffers zero catastrophic forgetting.
 
@@ -16,9 +16,9 @@ We prove four claims experimentally:
 
 2. **A minimal-neuron allocation law (Equation V4).** Facts require a measured floor of **4 neurons** (≈24.6K weights on LFM2.5-1.2B); skills scale as **n ≈ 58.4·ans_tokens − 323** (R² = 0.675) with adaptive doubling. Across 28 calibration items, **100% probe success**; across 10 skill/knowledge items, **100% success** with 64–4096 neurons.
 
-3. **Live learning that is not a system-prompt trick.** On LFM2.5-1.2B, a user teaches a novel fact in natural language mid-conversation (`My office code is ZEBRA-42`); the system allocates 4 neurons (dense path, ~10–25 s) or a detached rank-16 adapter (instant path, **~0.6–1.4 s end-to-end** via a teacher-forced probe gate), stores a **~1.8 MB sparse checkpoint**, and after a **brand-new process** restores only from that file and answers **`ZEBRA-42`** with **0% forgetting**. Deleting the checkpoint → refuse ("I don't know — teach me"). No answer string appears in any system prompt or code path; the few-shot prompt only teaches intent classification (`INTENT|kind|value`). Content/file learning (`learn file re_requiem.txt`) trains a 2048-neuron knowledge expert that answers protagonist / platforms / multiplayer queries via grounded retrieval from the expert's stored sentences.
+3. **Live learning that is not a system-prompt trick.** On LFM2.5-1.2B, a user teaches a novel fact in natural language mid-conversation (`My office code is ZEBRA-42`); the system allocates 4 neurons (dense path, ~10–25 s) or a detached rank-16 adapter (instant path, **~0.6–1.4 s end-to-end** via a teacher-forced probe gate), stores a **~1.8 MB sparse checkpoint**, and after a **brand-new process** restores only from that file and answers **`ZEBRA-42`** with **0% forgetting**. Deleting the checkpoint → refuse ("I don't know — teach me"). No answer string appears in any system prompt or code path; turn routing is done by a **fine-tuned System-1 decision classifier** (no regex, no intent prompt), and a second small LLM turn extracts `kind|value` only on learn turns. Content/file learning (`learn file re_requiem.txt`) trains a 2048-neuron knowledge expert that answers protagonist / platforms / multiplayer queries via grounded retrieval from the expert's stored sentences.
 
-4. **Base intelligence is a behavior model, not just an LM.** The Layer-0 base is specified (and prototyped via the LLM-native router) as a **behavior stack** whose core is **curiosity → learn-intent → problem-solving → thinking**, rather than a passive next-token predictor. Curiosity drives the refuse-and-offer-to-learn loop; learn-intent turns natural language into `learn|kind|value`; problem-solving and thinking are the default generators when no expert is paged. The frozen base never stores episodic facts — only dispositional behavior.
+4. **Base intelligence is a behavior model, not just an LM.** The Layer-0 base is specified as a **behavior stack** whose core is **curiosity → learn-intent → problem-solving → thinking**, rather than a passive next-token predictor. Curiosity drives the refuse-and-offer-to-learn loop for unlearned *personal/memory* queries; learn-intent turns natural language into `learn|kind|value` — both dispositions are now routed by a **fine-tuned System-1 decision classifier** (laya-evagi, 5-way action × fact-kind × topic over known-memory states); problem-solving and thinking are the default generators for open-domain turns (`answer_general` / `chitchat`). The frozen base never stores episodic facts — only dispositional behavior. The dedicated behavior fine-tune of the base *generators* remains roadmap item 1.
 
 We specify the full EvAGI stack as a three-layer hierarchy: **Layer 0** (router, global register, **behavior-model base intelligence**, expert register with sub-registers), **Layer 1** (main neurons / experts allocated by Equation V4), and **Layer 2** (sub-neurons that refine learning within a single main neuron). The design goal is a frontier model whose knowledge footprint scales with *learned content*, not with parameter count held in VRAM.
 
@@ -30,7 +30,7 @@ We specify the full EvAGI stack as a three-layer hierarchy: **Layer 0** (router,
 
 A model that learns during deployment must answer two questions at every turn:
 
-- **Does it already know?** If yes, answer; if no, refuse and offer to learn.
+- **Does it already know?** If yes, answer; if it is about the user's world (a fact they could teach), refuse and offer to learn; if it is open-domain, answer from base problem-solving.
 - **If learning, where does the new knowledge live so it cannot destroy the old?**
 
 Standard fine-tuning answers neither safely. Each gradient step moves shared weights; sequential tasks interfere. This is **catastrophic forgetting**, and it is the blocker between "a model that can be updated" and "a model that can *keep learning*."
@@ -57,9 +57,10 @@ This is EvAGI. The contribution of this report is to (a) prove the isolation cla
 | **Sub-register** | Per-neuron local register: tracks which sub-neurons exist inside a main neuron; avoids scanning the global pool. |
 | **Equation V4** | Empirical law predicting how many neurons a new item needs before training. |
 | **Governor** | Tiny MLP (11 features) that gates owned neurons, now registry-aware. |
-| **Base intelligence** | The frozen **behavior model** (curiosity, learn-intent, problem-solving, thinking). Never stores episodic facts. Prototype: LFM2.5-1.2B + LLM-native `understand()`. |
-| **Curiosity** | Base disposition: detect ignorance → refuse → offer to learn (drives the teach loop). |
-| **Learn-intent** | Parse natural language into `learn \| query \| chat \| unknown` + `kind\|value`. |
+| **Base intelligence** | The frozen **behavior model** (curiosity, learn-intent, problem-solving, thinking). Never stores episodic facts. Prototype: LFM2.5-1.2B + System-1 decision classifier (`laya-evagi`) with LLM `understand()` fallback. |
+| **System-1 / System-2** | System-1: fine-tuned routing classifier (`laya-evagi`) — action, fact-kind, topic in ~25 ms. System-2: LLM turns — value extraction on learn turns, full router when System-1 is low-confidence or unavailable. |
+| **Curiosity** | Base disposition: detect ignorance → refuse → offer to learn (drives the teach loop); applies to unlearned personal/memory queries, not open-domain questions. |
+| **Learn-intent** | Parse natural language into `learn \| answer_from_memory \| admit_ignorance \| answer_general \| chitchat` + `kind\|value`. |
 | **Problem-solving / thinking** | Default generative modes when no expert is paged (step-by-step, tool-use-ready). |
 
 ---
@@ -206,7 +207,7 @@ End-to-end session on `src/live_interactive_lfm2.py`:
 
 | Step | Action | Result |
 |------|--------|--------|
-| Code audit | `grep ZEBRA / Rehan / office code` in `live_interactive_lfm2.py` | **No** hardcoded answer for ZEBRA; "Rehan" appears only as a few-shot *routing* example (`my name is Rehan -> learn\|fact_name\|Rehan`) and a comment. System prompt only asks for `INTENT\|kind\|value`. |
+| Code audit | `grep ZEBRA / Rehan / office code` in `live_interactive_lfm2.py` | **No** hardcoded answer for ZEBRA; "Rehan" appears only as a few-shot *extraction* example (`my name is Rehan -> name\|Rehan`) in the System-2 prompt. Primary routing is the `laya-evagi` classifier (schema has no content strings); the `understand()` intent prompt survives only as fallback. |
 | Session A (process 1) | `My office code is ZEBRA-42` → learn | `fact_code=ZEBRA-42`, V4_n=4, probe **100%**, loss 0.0012, **~1.8 MB** ckpt |
 | Session A | `What is my office code?` | **`ZEBRA-42`** |
 | Session B (process 2, no re-teach) | Load only `evagi_live.pt` → ask 3 phrasings | **`ZEBRA-42` × 3** (`office code` / `My office code?` / `What's my code?`) |
@@ -214,9 +215,29 @@ End-to-end session on `src/live_interactive_lfm2.py`:
 
 Cross-session memory is **only** the sparse weight deltas + register in `evagi_live.pt`. There is no conversational transcript injected as a system-prompt memory block for fact recall.
 
-**Content / file learning:** `learn file /tmp/opencode/re_requiem.txt` → topic extracted as **`Resident Evil Requiem`** (proper-noun title, not filename); **2048 neurons** (hard cap = `inter/4`, never full-FFN); 9 sentences; loss ≈ 1.5–1.9; sparse ckpt **~50 MB** for content+fact. Queries route via title match (`top1=1.00`) and answer by **IDF-weighted grounded retrieval** over the expert's stored sentences (protagonist → Grace Ashcroft sentence; platforms → PS5/Xbox/PC sentence; multiplayer → co-op sentence). Foreign questions (Mars, meaning of life) refuse.
+**Content / file learning:** `learn file /tmp/opencode/re_requiem.txt` → topic extracted as **`Resident Evil Requiem`** (proper-noun title, not filename); **2048 neurons** (hard cap = `inter/4`, never full-FFN); 9 sentences; loss ≈ 1.5–1.9; sparse ckpt **~50 MB** for content+fact. Queries route via title match (`top1=1.00`) and answer by **IDF-weighted grounded retrieval** over the expert's stored sentences (protagonist → Grace Ashcroft sentence; platforms → PS5/Xbox/PC sentence; multiplayer → co-op sentence). Foreign *memory-style* questions refuse; open-domain questions (Mars, meaning of life) route to base problem-solving (`answer_general`, rev. D).
 
 **Checkpoint engineering:** Dense per-expert FFN deltas were ~3.2 GB/expert float32; loading them under 7.7 GB WSL RAM caused OOM kills. **Sparse deltas** (only owned rows of `w1/w3`, owned cols of `w2`) reduce a fact-only session to **~1.8 MB**. Content experts are larger (~50 MB at 2048 neurons) but still far below dense. Old v1 dense checkpoints are ignored on load (`safe_test.sh` drops >500 MB files as legacy dense).
+
+---
+
+### 4.7 System-1 Routing — the laya-evagi decision classifier (rev. D)
+
+Routing was the last regex/prompt holdout in the live CLI (`fact_field_fastpath`, `looks_q`, continuation / foreign-topic / sole-knowledge regex blocks plus an `INTENT|kind|value` few-shot prompt). All of it is replaced by a **fine-tuned System-1 decision classifier** — Laya (ModernBERT-large, `convaiinnovations/laya`) fine-tuned on EvAGI-specific synthetic decisions:
+
+- **Schema (single source of truth: `src/evagi_system1.py`)** — `action ∈ {learn, answer_from_memory, admit_ignorance, answer_general, chitchat}` × `fact_kind ∈ {personal_fact, skill_code, knowledge, content, none}` × `topic ∈ known topics ∪ {about_something_else}`. Input state is `{known_memory, user_message}`: the classifier **sees what the system already knows** before deciding — memory answer vs curiosity-refusal vs open-domain base answer.
+- **Data (`src/gen_laya_evagi_data.py`)** — 2,726 train / 481 val / 49 held-out *tricky battery*: pronoun follow-ups ("Does it have multiplayer?" after a Requiem teach), hijack probes ("What's my blood type?" with unrelated memory), teach-vs-question boundaries, re-teach updates, natural-case augmentation. Exclusion semantics forbid contradictions (`answer_from_memory` rows always carry a required topic; personal-memory rows exclude unrelated topics).
+- **Recipe (`src/train_laya_evagi.py`)** — CE + RLCD group-preference loss (`proper_reward`), 6 epochs, effective batch 16, single RTX 4070, ~22 min; global temperature fitted by validation NLL (inherited per-option buckets dropped).
+- **Results (`src/eval_laya_evagi.py`):**
+
+| Split | action acc | topic acc | p50 / p95 latency |
+|-------|-----------|-----------|-------------------|
+| Held-out val (n=481) | **1.000** | **1.000** | 25 ms / 36 ms |
+| Tricky battery (n=49) | **0.980** (48/49) | 0.974 (38/39) | 24 ms / 30 ms |
+
+Confidence is saturated (fitted T = 2.83), so the `conf < 0.55` System-2 fallback fires essentially only off-distribution — threshold sweep shows auto-coverage 1.000 / auto-precision 0.998 at any threshold 0–0.8. Residual error: 1/49 (capitalized exact-title phrasing). First call pays a one-time lazy load (~5–7 s); thereafter routing costs ~25–50 ms/turn.
+
+**Integration (`src/live_interactive_lfm2.py`)** — S1 decision → existing Understanding mapping: `learn` → System-2 `extract_learn` value extraction (questions/`?`/pronoun guards re-route to `understand()`), `answer_from_memory` → topic→eid map with embedding `match_expert` fallback, `admit_ignorance` → curiosity refusal, `answer_general`/`chitchat` → base generation. Every turn prints `system1: action=… conf=… (Xms)`; `understand()` survives only as fallback (low confidence or classifier unavailable — tested via `EVAGI_LAYA_DIR=/nonexistent`). **Behavior change:** open-domain questions (`What is the capital of France?`) are now answered by the base via `answer_general` instead of being refused; refusal is reserved for unlearned *personal/memory* queries.
 
 ---
 
@@ -228,7 +249,7 @@ Cross-session memory is **only** the sparse weight deltas + register in `evagi_l
 2. **Knowledge = isolated neurons.** A neuron (expert) owns a disjoint FFN channel set.  
 3. **Allocation is predicted, then corrected.** Equation V4 gives a lean prior; failure doubles on the grid.  
 4. **Registers are hierarchical.** Global pool for spawning; sub-registers for locality.  
-5. **Routing sees the register.** The classifier receives protection / ownership features, not just hidden states.  
+5. **Routing sees the register.** The System-1 classifier receives the known-memory state (what the register holds — topics + values as text), not just the raw utterance; expert selection then consumes `topic2eid` + centroids.  
 6. **Tiers: SSD → RAM → VRAM.** Neurons are paged in for the active turn; idle neurons do not occupy VRAM (unlike MoE).  
 7. **Curiosity before knowledge.** Unknown → refuse → offer teach is a first-class behavior, not an error path.
 
@@ -242,8 +263,8 @@ Layer 0 is the always-resident control plane:
 │  ┌──────────────┐   ┌──────────────────────────────────────┐   │
 │  │  Classifier  │◄──│  Expert Register (with sub-registers)│   │
 │  │  / Router    │   │  - what each neuron holds            │   │
-│  │  (HRM + LLM  │   │  - kind, value, support centroid     │   │
-│  │   understand)│   │  - sub-register pointers             │   │
+│  │  (laya-evagi │   │  - kind, value, support centroid     │   │
+│  │   + LLM fb)  │   │  - sub-register pointers             │   │
 │  └──────┬───────┘   └──────────────▲───────────────────────┘   │
 │         │ intent, eid              │ protection feats          │
 │  ┌──────▼──────────────────────────┴───────────────────────┐   │
@@ -258,7 +279,7 @@ Layer 0 is the always-resident control plane:
 │  │  Base Intelligence = BEHAVIOR MODEL (frozen)           │   │
 │  │  core: curiosity → learn-intent → problem-solving      │   │
 │  │        → thinking                                     │   │
-│  │  (prototype: LFM2.5-1.2B + understand())               │   │
+│  │  (prototype: LFM2.5-1.2B + System-1 classifier) │   │
 │  └────────────────────────────────────────────────────────┘   │
 │  ┌────────────────────────────────────────────────────────┐   │
 │  │  TinyPerExpertGovernor × active neurons (11-dim)       │   │
@@ -269,9 +290,10 @@ Layer 0 is the always-resident control plane:
 **Components:**
 
 1. **Classifier / Router**  
-   - Fast path: embedding cosine + token overlap against registered support centroids.  
-   - Slow path: **LLM-native `understand()`** — one short greedy generation classifies `learn | query | chat | unknown` and extracts `kind|value` from arbitrary natural language (no regex teach-patterns). Post-rules: questions never classify as learn; pronoun junk values rejected.  
-   - Decides: answer from base (problem-solving/thinking), answer from neuron, refuse+offer teach (curiosity), or spawn learn.
+   - **System-1 (fast, ~25 ms): fine-tuned decision classifier** `laya-evagi` — the schema of §4.7, input `{known_memory, user_message}`, output `action + fact_kind + topic + confidence`. Replaces **all** hardcoded regex routing and the intent few-shot prompt; no regex and no hand-written routing rules remain in the turn path.  
+   - **System-2 (fallback): LLM `understand()`** — one short greedy generation, used only when System-1 confidence < 0.55 or the classifier is unavailable; also performs value extraction (`extract_learn`) on learn turns with question/pronoun guards.  
+   - **Expert selection:** classifier `topic` → `topic2eid` exact map, else embedding cosine + lexical `match_expert` over registered support centroids (threshold 0.5 for memory answers, 0.75 for upgrade-to-memory).  
+   - Decides: answer from base (`answer_general`/`chitchat` — problem-solving/thinking), answer from neuron (`answer_from_memory`), refuse+offer teach (`admit_ignorance` — curiosity), or spawn learn (`learn`).
 
 2. **Global Register** (weight pool)  
    - Per-layer `occupied: Bool[inter]`, `ownership: Long[inter]`, `protection: Float[inter]`.  
@@ -284,16 +306,16 @@ Layer 0 is the always-resident control plane:
 
    | Behavior | Role | Prototype in current CLI |
    |----------|------|---------------------------|
-   | **Curiosity** | Detect ignorance; never bluff; refuse and *offer* to learn ("I don't know — teach me"). | `intent=unknown` → fixed refuse+teach string; confidence gate |
-   | **Learn-intent** | Turn any natural utterance into structured `learn\|kind\|value` (or query/chat/unknown). | `understand()` few-shot → `INTENT\|kind\|value`; questions forced non-learn |
-   | **Problem-solving** | When no expert applies and the task is instrumental, work the problem (steps, tools, subgoals). | Base chat / future tool-loop; currently free-form generate without expert mask |
+   | **Curiosity** | Detect ignorance; never bluff; refuse and *offer* to learn ("I don't know — teach me"). | System-1 `admit_ignorance` (unlearned personal/memory queries only) → fixed refuse+teach string; open-domain goes to `answer_general` instead |
+   | **Learn-intent** | Turn any natural utterance into structured `learn\|kind\|value` (or answer/refuse/chat). | System-1 `laya-evagi` classifier → `learn` + `fact_kind`; System-2 `extract_learn` → `kind\|value`; questions forced non-learn by guard |
+   | **Problem-solving** | When no expert applies and the task is instrumental, work the problem (steps, tools, subgoals). | System-1 `answer_general` → base generate without expert mask; future tool-loop |
    | **Thinking** | Default generative mode: deliberate, stepwise reasoning before committing an answer. | Base generate (temp-controlled); future: explicit think→answer traces |
 
    Constraints on the behavior base:
 
    - **Frozen** (`requires_grad_(False)` except live FFN under hard mask during a learn step).  
    - **Does not store episodic facts.** Names, codes, preferences, document facts live only in expert neurons + sparse checkpoint.  
-   - **Hosts the router** (`understand`) so learn-intent is the same weights that do thinking/problem-solving — one brain, two roles (disposition vs. knowledge).  
+   - **Hosts the router** (System-1 classifier + `understand()` fallback) so learn-intent sits beside thinking/problem-solving in Layer 0 — one chassis, two roles (disposition vs. knowledge).  
    - Target training for a *dedicated* EvAGI base (roadmap): RL/curriculum that rewards (a) correct "I don't know" + learn offer, (b) high-quality `learn\|kind\|value` extractions, (c) multi-step problem solutions, (d) explicit thinking traces — i.e. train **behavior**, let experts supply **content**.
 
 4. **Expert Register (with sub-registers)**  
@@ -305,17 +327,18 @@ Layer 0 is the always-resident control plane:
 
 ```
 user prompt P
-  → classifier.understand(P)          # learn-intent (behavior #2)
-      if knowledge present and confident:
-          route to matching expert e (register lookup + embedding)
-          page e's sparse delta from SSD → apply mask → generate
-          restore base snapshot
-      elif question about unknown topic:
+  → System-1: decide(P, known_memory)      # laya-evagi, ~25 ms (behavior #2)
+      action=answer_from_memory:
+          route to matching expert e (topic→eid, embedding fallback)
+          page e's sparse delta → apply mask → generate → restore base
+      action=admit_ignorance:
           curiosity: refuse + offer teach   # behavior #1
-      elif casual / open problem:
+      action=answer_general | chitchat:
           base: problem-solving or thinking # behaviors #3–4
-      elif teaching signal:
-          go to Layer 1 spawn protocol
+      action=learn:
+          System-2 extract kind|value → Layer 1 spawn protocol
+      conf < 0.55 or classifier unavailable:
+          → System-2 understand() fallback (full router + extraction)
   → append turn summary to classifier context (what was learned / asked)
 ```
 
@@ -474,11 +497,13 @@ This is **not** skipping learning — it is skipping *base* F+B. Base remains a 
 ```
 1. Load base → GPU once; snapshot FFN; build empty Global Register.
 2. For each user turn:
-   a. understand(P) via classifier (LLM one-liner + embedding fast path)
-   b. if query & expert match: page delta, mask, generate, restore base
-   c. if query & no match: refuse + offer teach
-   d. if learn: V4 → allocate → train → probe → sparse save → register
-   e. if chat: base generate
+   a. System-1 decide(P, known_memory) — fine-tuned classifier, ~25 ms
+      (fallback: understand() LLM one-liner if conf < 0.55 or S1 unavailable)
+   b. if answer_from_memory & expert match: page delta, mask, generate, restore base
+   c. if admit_ignorance: refuse + offer teach
+   d. if learn: System-2 extract kind|value → V4 → allocate → train → probe
+      → sparse save → register
+   e. if answer_general | chitchat: base generate
    f. log turn outcome to classifier memory
 3. On quit: save items + sparse deltas + register + router (≈ MBs).
 4. On next launch: load base + checkpoint; rebuild masks from ownership;
@@ -493,11 +518,11 @@ Commands exposed: natural teaching, `learn file <path>`, `learn this: <text>`, `
 
 1. **Learn-turn is now ~0.6–1.4 s** (teacher-forced probe gate, §7.2) — no single step dominates; remaining cost is optimizer steps for long answers (10–30 s above ~150 answer tokens) plus `MAX_LEN=256` truncation, which caps learnable answer length regardless of rank. Dense mask path (~10–19 s/fact) remains as `EVAGI_INSTANT=0` fallback.  
 2. **Skill/content V4 variance (R²=0.675)** — doubling retries add tail latency; content expert uses a hard cap (`inter/4 = 2048`) so probe may accept on loss-with-partial-hit rather than 100% exact prose match.  
-3. **Classifier errors** — questions can be mis-tagged as `learn`; mitigated by post-rules (questions never learn) and source-derived QA prompts, not eliminated.  
+3. **System-1 classifier errors** — rare (held-out val 100%, tricky battery 98%; residual case = capitalized exact-title phrasings); mitigated by the `conf < 0.55` System-2 fallback, extraction question/pronoun guards, and source-derived QA prompts, not eliminated. The battery is synthetic — live distribution shift is the real risk.  
 4. **Single-GPU / single-process** — no multi-tenant shard of the register yet.  
 5. **Content answers** rely on grounded lexical retrieval over stored sentences when masked generation is incoherent; book-scale recall not solved.  
 6. **Sub-neuron (Layer 2)** specified and partially exercised via content topics; full local-pool allocator is the next implementation milestone.  
-7. **Base is not yet behavior-trained** — current base is a general instruct LM (LFM2.5) with a curated `understand()` prompt; a dedicated curiosity / learn-intent / problem-solving / thinking fine-tune is roadmap item 1, not shipped.  
+7. **Base generators not yet behavior-trained** — routing half of the behavior stack is shipped (the System-1 classifier is a *learned* model: curiosity, learn-intent, open-domain decisions are trained, not prompted); the base itself is still a general instruct LM (LFM2.5) answering `answer_general`/`chat` turns — a dedicated problem-solving / thinking fine-tune is roadmap item 1, not shipped.  
 8. Experiments on S/M scales use custom or TinyTalk models; L-scale results are calibration + interactive CLI (including ZEBRA-42 fresh-process control), not a full 5-skill benchmark at 1.2B with the new LLM router (TinyTalk path carries the 0% forgetting conversational proof).
 
 ---
@@ -509,15 +534,17 @@ Commands exposed: natural teaching, `learn file <path>`, `learn this: <text>`, `
 - Catastrophic forgetting in sequential live learning is **solved** at the architectural level by hard neuron isolation + register + governors: **39.89% → 0.00%** forgetting on the controlled stream; **0.0%** across five skills and cross-session facts on conversational models.  
 - **Equation V4** makes isolation *affordable*: facts cost 4 neurons; skills cost O(answer tokens) with a calibrated slope and adaptive doubling.  
 - The stack works end-to-end on a **consumer RTX 4070**: teach in natural language, **100% recall in a brand-new process** from a **~1.8 MB sparse checkpoint** (ZEBRA-42 control), **0% forgetting**; unknown → refuse + teach; no system-prompt fact memory. Content files train capped 2048-neuron experts with grounded multi-aspect answers.  
+- **Routing is learned, not scripted** (rev. D): a fine-tuned System-1 classifier (`laya-evagi`) replaced every regex and the intent prompt in the turn path — 100% action accuracy on 481 held-out decisions, 98% on a 49-case adversarial battery, ~25 ms/turn (vs. ~0.5–2 s for an LLM router). Curiosity, learn-intent, and open-domain problem-solving are now *trained dispositions* of Layer 0.  
 - MoE is the wrong scaling story for *live* learning (VRAM-resident experts). EvAGI's register + SSD-tier neurons scales knowledge with content, not with resident parameters.  
 - **Base intelligence is a behavior model.** Core dispositional stack: **curiosity** (detect ignorance → refuse → offer learn), **learn-intent** (NL → `learn|kind|value`), **problem-solving**, **thinking**. Episodic knowledge is externalized to neurons; the base stays a pure doer/learner, never a fact warehouse.
 
 **Roadmap (in order):**
 
-1. **Behavior-trained base** — fine-tune/RL the base specifically on curiosity (know-what-you-don't-know), learn-intent extraction quality, multi-step problem-solving, and explicit thinking traces; keep facts 100% out of base weights.  
+1. **Behavior-trained base generators** — the routing half ships (System-1 classifier, §4.7); next, fine-tune/RL the base itself on multi-step problem-solving and explicit thinking traces (curiosity/learn-intent decisions already live in the classifier); keep facts 100% out of base weights.  
 2. **Layer 2 sub-registers** — local pools under each main neuron; content trees.  
 3. ~~**Detached adapter experts**~~ — **DONE**: instant path trains in ~0.6–1.4 s end-to-end (20× vs dense, 0% forgetting, cross-process restore); teacher-forced probe gate + `predict_rank()` capacity law shipped; next is SSD paging.  
-4. **Classifier turn-memory** — every turn updates routing priors (dynamic, not static few-shot).  
+3b. ~~**System-1 decision classifier**~~ — **DONE (rev. D)**: regex/prompt routing removed; `laya-evagi` fine-tune + generator/eval suite shipped; next is turn-memory over the classifier.  
+4. **Classifier turn-memory** — every turn updates routing priors (dynamic, not static training data).  
 5. **Batch content ingestion** — books/courses as forests of sub-neurons.  
 6. **Multi-scale register sharding** — frontier parameter counts with constant VRAM.  
 7. **Publishable benchmark** — standard CL suites (CIFAR/ImageNet splits, text CL) with forgetting = 0 under isolation, vs EWC/PackNet/HAT/LoRA/MoE baselines; plus a behavior suite (refuse-accuracy, learn-intent F1, problem-solving pass@k, thinking-chain quality).
@@ -534,6 +561,10 @@ Commands exposed: natural teaching, `learn file <path>`, `learn this: <text>`, `
 | Calibration sweeps | `src/calibrate_v4_lfm2.py`, `src/calibrate_v4.py` |
 | Instant adapter + capacity law | `src/instant_expert.py` (`train_instant`, `predict_rank`, `RANK_GRID`) |
 | TF probe gate | `src/live_interactive_lfm2.py` (`probe_teacher_forced`, `probe_gated`) |
+| System-1 decision schema + singleton | `src/evagi_system1.py` (`System1.decide`, `known_memory_from_items`, `build_questions`) |
+| Routing dataset generator | `src/gen_laya_evagi_data.py` → `data/laya_evagi/{train,val,battery}.jsonl` |
+| System-1 fine-tune (Laya base) | `src/train_laya_evagi.py` → `models/laya-evagi/` (base: `convaiinnovations/laya`, ModernBERT-large) |
+| System-1 eval (acc / battery / latency / threshold sweep) | `src/eval_laya_evagi.py` |
 | Adapter capacity sweeps | `src/sweep_adapter_rank.py` → `results_adapter_capacity/sweep_*.json` |
 | Calibration JSON | `results_calibration/calibrate_v4_*.json` |
 | Cross-session proof | `results_llm_live/prove_cross_session.json` |
@@ -552,7 +583,7 @@ Commands exposed: natural teaching, `learn file <path>`, `learn this: <text>`, `
 rm -f models/LFM2.5-1.2B-Instruct/evagi_live.pt
 printf 'My office code is ZEBRA-42\nWhat is my office code?\nWhat is the meaning of life?\nquit\n' \
   | timeout 300 .venv/bin/python -u src/live_interactive_lfm2.py
-# → learns ZEBRA-42; answers ZEBRA-42; refuses meaning-of-life
+# → learns ZEBRA-42; answers ZEBRA-42; meaning-of-life answers from base (answer_general)
 
 printf 'What is my office code?\nMy office code?\nquit\n' \
   | timeout 120 .venv/bin/python -u src/live_interactive_lfm2.py

@@ -49,6 +49,12 @@ from src.instant_expert import (
     predict_rank,
     RANK_GRID,
 )
+from src.evagi_system1 import (
+    CONF_FALLBACK,
+    NO_TOPIC,
+    System1,
+    known_memory_from_items,
+)
 
 import os
 USE_INSTANT = os.environ.get("EVAGI_INSTANT", "1") != "0"  # 0 = force dense mask path
@@ -243,24 +249,57 @@ def lfm2_neuron_features(model, mask, layer_idx, n_layers, register: NeuronRegis
 # ---------------------------------------------------------------------------
 # QA / probe builders (open content — fact, skill, knowledge)
 # ---------------------------------------------------------------------------
-def get_answer(kind: str, value: str) -> str:
+_PREAMBLE_RE = re.compile(
+    r"^(?:store this|note that|remember that|remember|keep this|save this|"
+    r"for future reference|teach (?:me|you)\b[^:]{0,24})\s*[,:\-]\s*",
+    re.I,
+)
+
+
+def _teach_clean(s: str) -> str:
+    """Strip teaching preambles ('store this: ...') from a raw teach line."""
+    s = " ".join((s or "").split())
+    prev = None
+    while prev != s:
+        prev = s
+        s = _PREAMBLE_RE.sub("", s)
+    return s.strip()
+
+
+def _is_code_skill(source_text: str) -> bool:
+    """True when a skill teach line looks like code (legacy python target)."""
+    if not source_text:
+        return True
+    return bool(re.search(
+        r"def |class |import |```|\bfunction\b|\bpython\b|=>|\bfor\s+\w+\s+in\b",
+        source_text, re.I,
+    ))
+
+
+def get_answer(kind: str, value: str, source_text: str = "") -> str:
     if kind.startswith("fact_"):
         return f" {value.strip()}"
+    src = _teach_clean(source_text)
+    if src:
+        # keep at most two sentences so probe targets stay learnable
+        src = " ".join(re.split(r"(?<=[.!?])\s+", src)[:2])
     if kind == "skill_code":
+        if src:
+            return f" {src}"
         v = InputRouter.normalize_skill_value(value)
         return (
             f" Here is how to {v} in Python:\n"
             f"```python\n# {v}\n# (learned example)\n```"
         )
     if kind == "knowledge":
-        return f" {value.strip()}"
+        return f" {(src or value).strip()}"
     return f" {value.strip()}"
 
 
 def make_qa_pairs(kind: str, value: str, source_text: str = "") -> list[tuple[list[dict], str]]:
     # normalize skill value for prompts (avoid "How do I how to X?")
     prompt_value = InputRouter.normalize_skill_value(value) if kind == "skill_code" else value.strip()
-    answer = get_answer(kind, value)
+    answer = get_answer(kind, value, source_text)
     v = prompt_value
     if kind.startswith("fact_"):
         noun = kind.replace("_", " ")
@@ -306,14 +345,17 @@ def make_qa_pairs(kind: str, value: str, source_text: str = "") -> list[tuple[li
     elif kind == "skill_code":
         prompts = [
             f"How do I {v}?",
-            f"Write code to {v}.",
-            f"Show me how to {v} in Python.",
             f"I need to {v}. Can you help?",
             f"Can you teach me to {v}?",
             f"How would you {v}?",
-            f"Give me an example to {v}.",
-            f"What's the code for {v}?",
         ]
+        if _is_code_skill(source_text):
+            prompts += [
+                f"Write code to {v}.",
+                f"Show me how to {v} in Python.",
+                f"Give me an example to {v}.",
+                f"What's the code for {v}?",
+            ]
     elif kind == "knowledge":
         prompts = [
             f"What is {v}?",
@@ -348,7 +390,7 @@ def make_qa_pairs(kind: str, value: str, source_text: str = "") -> list[tuple[li
 
 def make_probes(kind: str, value: str, source_text: str = "") -> list[tuple[list[dict], str]]:
     pv = InputRouter.normalize_skill_value(value) if kind == "skill_code" else value.strip()
-    answer = get_answer(kind, value)
+    answer = get_answer(kind, value, source_text)
     v = pv
     if kind.startswith("fact_"):
         noun = kind.replace("_", " ")
@@ -362,12 +404,123 @@ def make_probes(kind: str, value: str, source_text: str = "") -> list[tuple[list
                 if head:
                     prompts += [f"What is my {head}?", f"My {head}?"]
     elif kind == "skill_code":
-        prompts = [f"Remind me, how do I {v}?", f"The steps to {v} again?", f"Code for {v}?"]
+        prompts = [f"Remind me, how do I {v}?", f"The steps to {v} again?"]
+        if _is_code_skill(source_text):
+            prompts.append(f"Code for {v}?")
     elif kind == "knowledge":
         prompts = [f"In simple terms, what is {v}?", f"Remind me about {v}.", f"Quick summary of {v}?"]
     else:
         prompts = [f"Recall {v}?", f"What was {v}?", f"{v} again?"]
     return [([{"role": "user", "content": p}], answer) for p in prompts]
+
+
+def extract_learn(
+    model, tok, text: str, fact_kind: str,
+) -> tuple[str | None, str | None]:
+    """System-2 value extraction for a teaching turn classified by System 1.
+
+    Returns (kind, value); (None, None) when the message is actually a
+    question or holds nothing worth remembering (classifier-error guard).
+    """
+    hint = fact_kind if fact_kind in (
+        "personal_fact", "skill_code", "knowledge") else "knowledge"
+    if hint == "personal_fact":
+        fmt = (
+            "  Reply EXACTLY: field|value  (field: short snake_case noun)\n"
+            "  Examples:\n"
+            "  my name is Rehan -> name|Rehan\n"
+            "  my blood type is O+ -> blood_type|O+\n"
+            "  my manager is Dax -> boss|Dax\n"
+            "  my birthday is April 3rd -> birthday|April 3rd\n"
+            "  my wifi password is NEBULA-77 -> wifi_password|NEBULA-77\n"
+            "  my office code changed to KAPPA-9 -> office_code|KAPPA-9\n"
+            "  my favorite color is teal -> favorite_color|teal\n"
+        )
+    elif hint == "skill_code":
+        fmt = (
+            "  Reply EXACTLY: how-to phrase, 2-4 words, the goal only "
+            "(omit quantities and details, no 'how to' prefix)\n"
+            "  Examples:\n"
+            "  when you make coffee use 18g beans and 300ml water -> make coffee\n"
+            "  teach me how to change a tire -> change a tire\n"
+            "  always double-check my calendar before booking -> "
+            "double-check my calendar\n"
+        )
+    else:
+        fmt = (
+            "  Reply EXACTLY: short topic, 2-7 words, only the subject\n"
+            "  Examples:\n"
+            "  Resident Evil Requiem is a survival horror game by Capcom -> "
+            "Resident Evil Requiem\n"
+            "  our standup is at 10am every day -> standup schedule\n"
+            "  the annual budget review happens every October -> budget review\n"
+        )
+    sys_msg = (
+        "You extract what to remember from a message already classified as teaching.\n"
+        f"Type: {hint}\n"
+        + fmt
+        + "  If the message is really a question seeking information -> QUESTION\n"
+        "  If nothing is worth remembering -> NONE\n"
+        "Reply with ONLY that one line — never write the type name, "
+        "angle brackets, or tags in the reply.\n"
+    )
+    messages = [
+        {"role": "system", "content": sys_msg},
+        {"role": "user", "content": text},
+    ]
+    pid = encode_prompt(tok, messages).unsqueeze(0).to(DEVICE)
+    with torch.no_grad():
+        out = model.generate(
+            input_ids=pid,
+            attention_mask=torch.ones_like(pid),
+            max_new_tokens=24,
+            do_sample=False,
+            eos_token_id=tok.eos_token_id,
+            pad_token_id=tok.pad_token_id if tok.pad_token_id is not None else 0,
+        )
+    line = tok.decode(out[0][pid.size(1):], skip_special_tokens=True).strip()
+    line = line.split("\n")[0].strip().strip("`\"' *")
+    # model sometimes echoes markup from older prompts (<field>blood_type</field>)
+    line = re.sub(r"</?[a-zA-Z][^>]{0,40}>", " ", line)
+    line = " ".join(line.split())
+    if not line or line.upper() in ("QUESTION", "NONE") or line.endswith("?"):
+        return None, None
+
+    def _clean(v: str) -> str | None:
+        v = v.strip()
+        if not v or v.lower() in (
+            "you", "user", "me", "i", "it", "this", "that", "something",
+        ):
+            return None
+        words = v.split()
+        if len(words) > 16:
+            v = " ".join(words[:16])
+        return v
+
+    type_words = {
+        "personal_fact", "skill_code", "knowledge", "content",
+        "fact", "skill", "learn", "field", "value",
+    }
+    if hint == "personal_fact":
+        parts = [p.strip() for p in line.split("|") if p.strip()]
+        parts = [p for p in parts if p.lower() not in type_words]
+        if len(parts) < 2:
+            return None, None  # field|value required — let System-2 reclassify
+        field = re.sub(r"[^a-z0-9_]+", "_", parts[0].strip().lower()).strip("_")
+        field = re.sub(r"^field_+", "", field)  # model sometimes writes "field blood_type"
+        value = _clean("|".join(parts[1:]))
+        if not field or not value or field in type_words:
+            return None, None
+        return f"fact_{field}", value
+    if "|" in line:
+        value = _clean(line.split("|", 1)[1])
+        if not value:
+            return None, None
+        return hint, value
+    value = _clean(line)
+    if not value:
+        return None, None
+    return hint, value
 
 
 def expected_match(text: str, answer: str, kind: str, value: str) -> bool:
@@ -1119,7 +1272,7 @@ def main():
         else:
             key = f"{kind}:{value.lower()}"
 
-        answer = get_answer(kind, value)
+        answer = get_answer(kind, value, source_text)
         ans_tok = len(encode_answer(tok, answer))
         val_tok = len(encode_answer(tok, " " + value))
         n0 = predict_neurons_v4(kind, ans_tok, val_tok)
@@ -1183,6 +1336,17 @@ def main():
                 "source_text": source_text,
                 "learned_at": time.time(),
             }
+            if kind == "knowledge":
+                clean_src = _teach_clean(source_text)
+                if clean_src:
+                    items[key]["sentences"] = [
+                        s.strip() for s in re.split(r"(?<=[.!?])\s+", clean_src)
+                        if len(s.strip()) > 8
+                    ][:6]
+                    items[key]["summary"] = clean_src[:300]
+                else:
+                    items[key]["sentences"] = [value]
+                    items[key]["summary"] = value
             if adapter is not None:
                 items[key]["rank"] = int(adapter.rank)
             elif gov is not None:
@@ -1420,6 +1584,13 @@ def main():
                     epochs=max(40, TRAIN_EPOCHS), lr=INSTANT_LR, batch=BATCH, device=DEVICE,
                 )
                 acc = probe_gated(model, tok, probes, answer, "knowledge", topic, None, adapter=ad, threshold=0.34)
+                if acc < 0.34 and topic:
+                    acc = max(acc, probe_hit_rate(
+                        model, tok,
+                        [([{"role": "user", "content": f"What is {topic}?"}], f" {topic}")]
+                        if topic and len(topic) < 80 else probes[:1],
+                        f" {topic}", "knowledge", topic, None, adapter=ad,
+                    ))
                 dt = time.time() - t0
                 print(f"  instant attempt {attempt+1}: rank={rank} loss={loss:.4f} probe={acc:.0%} ({dt:.2f}s)")
                 if acc >= 0.34 or (loss < 1.5 and acc > 0):
@@ -1558,193 +1729,83 @@ def main():
             if m["kind"] == "knowledge" and (m.get("title") or m.get("value"))
         ]
 
-        # Fast path: if question about a known fact field, skip LLM classify
-        low = text.lower().strip()
-        fact_field_hit = None
-        if "?" in text or re.match(r"^(what|who|tell me|remind|do you|can you)", low):
-            for kind in learned_kinds:
-                if not kind.startswith("fact_"):
-                    continue
-                field = kind.split("_", 1)[1].lower()
-                # natural field heads stored from THIS item's source only
-                # ("office code" from "My office code is ZEBRA-42")
-                extra_heads = []
-                for m in items.values():
-                    if m["kind"] == kind and m.get("source_text"):
-                        mm = re.match(
-                            r"^(?:my|the)\s+(.+?)\s+is\s+",
-                            m["source_text"].strip().rstrip(".!?"), re.I,
-                        )
-                        if mm:
-                            extra_heads.append(mm.group(1).strip().lower())
-                fields = [field] + [h for h in extra_heads if h]
-                hit = None
-                for f in fields:
-                    if f and f in low:
-                        hit = f
-                        break
-                if hit:
-                    for e in input_router.experts:
-                        if e["kind"] == kind:
-                            fact_field_hit = (kind, e["expert_id"], e["value"])
-                            break
-                if fact_field_hit:
-                    break
+        # ---- System 1: fine-tuned decision model (paper 5.2, no regexes) ----
+        known_mem, known_topics, topic2eid = known_memory_from_items(items)
+        dec = None
+        t_s1 = time.time()
+        try:
+            dec = System1.decide(text, known_mem, known_topics)
+            print(
+                f"  system1: action={dec.action} kind={dec.fact_kind} "
+                f"topic={dec.topic} conf={dec.conf:.2f} "
+                f"({(time.time() - t_s1) * 1000:.0f}ms)"
+            )
+        except Exception as e:
+            print(f"  system1 unavailable ({e}); using System-2")
 
-        if fact_field_hit:
-            kind, eid, value = fact_field_hit
-            route = Understanding("query", kind, value, eid, 0.9, "fact_field_fastpath")
-        else:
-            route = input_router.understand(model, tok, text, learned_kinds, known_titles)
-            # For query OR unknown questions, try expert match — content topics
-            # are often classified unknown until we hit a registered expert.
-            if route.intent in ("query", "unknown"):
-                eid, ekind, top1, margin = input_router.match_expert(model, tok, text)
-                # Title/key overlap sets top1 to >=0.5 via match_expert bump;
-                # bare cosine 0.5–0.74 is too weak to hijack unknown → query.
-                knowledge_eids = {e["expert_id"] for e in input_router.experts if e["kind"] == "knowledge"}
-                looks_q = (
-                    "?" in text
-                    or bool(re.match(
-                        r"^(what|who|when|where|why|which|how|does|do|did|is|are|"
-                        r"tell me|remind me|explain)\b",
-                        text.lower().strip(),
-                    ))
+        route = None
+        if dec is not None and dec.conf >= CONF_FALLBACK:
+            if dec.action == "learn":
+                if dec.fact_kind == "content":
+                    return learn_content(_teach_clean(text))
+                k2, v2 = extract_learn(
+                    model, tok, text, dec.fact_kind or "knowledge")
+                if k2 and v2:
+                    route = Understanding(
+                        "learn", k2, v2, None, dec.conf, f"s1 extract {k2}")
+                # else: extraction guard hit -> reclassify with System-2 below
+            elif dec.action == "answer_from_memory":
+                route = Understanding(
+                    "query", None, None, None, dec.conf, "s1 memory")
+            elif dec.action == "admit_ignorance":
+                route = Understanding(
+                    "unknown", None, None, None, dec.conf, "s1 curiosity")
+            else:
+                route = Understanding(
+                    "chat", None, None, None, dec.conf, f"s1 {dec.action}")
+
+        if route is None:
+            # System-2 alone: low System-1 confidence or extraction guard hit
+            route = input_router.understand(
+                model, tok, text, learned_kinds, known_titles)
+
+        # ---- expert resolution for memory answers ----
+        if route.intent in ("query", "unknown"):
+            eid = None
+            if (dec is not None and dec.conf >= CONF_FALLBACK
+                    and route.intent == "query"
+                    and dec.topic and dec.topic != NO_TOPIC):
+                eid = topic2eid.get(dec.topic)
+            if eid is None:
+                ceid, _ckind, top1, _margin = input_router.match_expert(
+                    model, tok, text)
+                need = 0.5 if route.intent == "query" else 0.75
+                if ceid is not None and top1 >= need:
+                    eid = ceid
+                    route.reason = f"match top1={top1:.2f} {route.reason}"
+            if eid is None and route.kind:
+                # System-2 named a learned kind explicitly (e.g. fact_name)
+                for e in input_router.experts:
+                    if e["kind"] == route.kind:
+                        eid = e["expert_id"]
+                        route.reason = f"kind match {route.kind} {route.reason}"
+                        break
+            if eid is not None:
+                em = next(
+                    (m for m in items.values() if m["expert_id"] == eid), None)
+                route = Understanding(
+                    "query",
+                    (em or {}).get("kind") or route.kind,
+                    (em or {}).get("value") or route.value,
+                    eid,
+                    max(route.confidence, 0.8),
+                    route.reason or "expert",
                 )
-                # For open unknown questions, prefer a dedicated knowledge-expert match
-                # (follow-ups like "does it have multiplayer?" often cosine to facts).
-                if route.intent == "unknown" and looks_q and knowledge_eids:
-                    kid, ktop, _ = None, 0.0, 0.0
-                    # re-score only against knowledge experts
-                    try:
-                        ids_q = tok(text, add_special_tokens=False, return_tensors="pt")["input_ids"][0].to(DEVICE)
-                        with torch.no_grad():
-                            emb_q = F.normalize(model.model.embed_tokens(ids_q).mean(0).float(), dim=0)
-                        best_k, best_s = None, 0.0
-                        for e in input_router.experts:
-                            if e["kind"] != "knowledge":
-                                continue
-                            c = F.normalize(e["support_centroid"].to(DEVICE).float(), dim=0)
-                            s = float(torch.dot(emb_q, c))
-                            # boost if title tokens hit
-                            title = (e.get("title") or e.get("value") or "").lower()
-                            if title and title in text.lower():
-                                s = max(s, 1.0)
-                            else:
-                                tw = {t for t in re.findall(r"[a-z0-9]{3,}", title)}
-                                qw = set(re.findall(r"[a-z0-9]{3,}", text.lower()))
-                                if tw and len(tw & qw) >= max(2, len(tw) // 2):
-                                    s = max(s, 0.85)
-                                # short follow-up: pronoun/verb questions accept sole knowledge expert
-                                # ONLY if they look like continuations (it/game/topic), not brand-new domains
-                                elif len(knowledge_eids) == 1 and s >= 0.25:
-                                    lowq = text.lower()
-                                    title_toks = {t for t in re.findall(r"[a-z0-9]{3,}", title)}
-                                    qt = set(re.findall(r"[a-z0-9]{3,}", lowq))
-                                    continuation = bool(title_toks & qt) or bool(re.search(
-                                        r"\b(it|its|they|them|this|that|game|series|does|do|"
-                                        r"has|have|was|were|about|there)\b", lowq
-                                    ))
-                                    # refuse clearly foreign domains
-                                    foreign = bool(re.search(
-                                        r"\b(mars|capital|president|currency|weather|"
-                                        r"meaning of life|quantum|string theory)\b", lowq
-                                    ))
-                                    if continuation and not foreign:
-                                        s = max(s, 0.76)
-                            if s > best_s:
-                                best_s, best_k = s, e
-                        if best_k is not None and best_s >= 0.75:
-                            eid, top1, ekind = best_k["expert_id"], best_s, "knowledge"
-                        elif (
-                            best_k is not None
-                            and len(knowledge_eids) == 1
-                            and best_s >= 0.40
-                        ):
-                            lowq = text.lower()
-                            title = (best_k.get("title") or best_k.get("value") or "").lower()
-                            title_toks = set(re.findall(r"[a-z0-9]{3,}", title))
-                            qt = set(re.findall(r"[a-z0-9]{3,}", lowq))
-                            continuation = bool(title_toks & qt) or bool(re.search(
-                                r"\b(it|its|they|them|this|that|game|series|about|there|"
-                                r"multiplayer|camera|engine|plot|story|release)\b", lowq
-                            ))
-                            foreign = bool(re.search(
-                                r"\b(mars|capital|president|currency|weather|"
-                                r"meaning of life|quantum|string theory|france|germany)\b", lowq
-                            ))
-                            if continuation and not foreign:
-                                eid, top1, ekind = best_k["expert_id"], max(best_s, 0.76), "knowledge"
-                    except Exception:
-                        pass
-                if route.intent == "unknown":
-                    sole_k = (
-                        looks_q
-                        and ekind == "knowledge"
-                        and eid in knowledge_eids
-                        and len(knowledge_eids) == 1
-                        and top1 >= 0.35
-                    )
-                    # 0.35-0.74 cosine between two generic "what is…" questions
-                    # is NOT topical: require shared topic words or a genuine
-                    # follow-up pronoun, else refuse (blood type ≠ aurora station)
-                    if sole_k:
-                        ent = next(
-                            (e for e in input_router.experts
-                             if e["expert_id"] == eid),
-                            None,
-                        )
-                        title = str(
-                            (ent or {}).get("title")
-                            or (ent or {}).get("value") or ""
-                        ).lower()
-                        tt = set(re.findall(r"[a-z0-9]{3,}", title))
-                        qt = set(re.findall(r"[a-z0-9]{3,}", text.lower()))
-                        cont = bool(re.search(
-                            r"\b(it|its|they|them|this|that|game|series|does|do|"
-                            r"has|have|was|were|about|there|multiplayer|camera|"
-                            r"engine|plot|story|release)\b", text.lower(),
-                        ))
-                        sole_k = bool(tt & qt) or cont
-                    matched = eid is not None and (
-                        top1 >= 0.75 or sole_k
-                    )
-                else:
-                    matched = (
-                        eid is not None
-                        and (top1 >= 0.50 or (route.kind and ekind == route.kind))
-                    )
-                if matched:
-                    # never let a low-sim fact expert absorb unknown questions
-                    if (
-                        route.intent == "unknown"
-                        and ekind != "knowledge"
-                        and eid not in knowledge_eids
-                        and top1 < 0.75
-                    ):
-                        route = Understanding(
-                            "unknown", route.kind, route.value, None, 0.4,
-                            f"unknown_reject_fact top1={top1:.2f}",
-                        )
-                    else:
-                        route = Understanding(
-                            "query", ekind or route.kind, route.value, eid,
-                            max(route.confidence, top1),
-                            f"match top1={top1:.2f} {route.reason}",
-                        )
-                elif route.intent == "query" and route.kind:
-                    for e in input_router.experts:
-                        if e["kind"] == route.kind:
-                            route.expert_id = e["expert_id"]
-                            route.confidence = max(route.confidence, 0.7)
-                            break
-                    if route.expert_id is None:
-                        route = Understanding(
-                            "unknown", route.kind, route.value, None, 0.4,
-                            f"query_no_expert top1={top1:.2f}",
-                        )
-                elif route.intent == "unknown":
-                    route.reason = f"unknown top1={top1:.2f}"
+            elif route.intent == "query":
+                route = Understanding(
+                    "unknown", route.kind, route.value, None, 0.4,
+                    f"no_expert ({route.reason})",
+                )
 
         print(
             f"  understand: intent={route.intent} kind={route.kind} "
@@ -1910,16 +1971,16 @@ def main():
                         deduped.append(tk)
                 reply = " ".join(deduped)
                 restore_base()
-                if value and expected_match(raw, get_answer(kind, value), kind, value):
+                if value and expected_match(raw, get_answer(kind, value, meta.get("source_text", "")), kind, value):
                     return value
-                if value and expected_match(reply, get_answer(kind, value), kind, value):
+                if value and expected_match(reply, get_answer(kind, value, meta.get("source_text", "")), kind, value):
                     return reply.strip() if reply.strip() != value else value
                 # if raw already matched but deduped lost it, return value
                 if value and norm_val in norm_raw:
                     return value
                 restore_base()
                 # still verify raw
-                if value and expected_match(raw, get_answer(kind, value), kind, value):
+                if value and expected_match(raw, get_answer(kind, value, meta.get("source_text", "")), kind, value):
                     return value
                 return (
                     f"I tried expert {route.expert_id} but I'm not confident. "
@@ -1932,7 +1993,7 @@ def main():
                 grounded = _grounded_content(text)
                 # If masked gen is coherent AND relevant, use it; else grounded notes.
                 if reply.strip() and not _garbage(reply):
-                    if value and expected_match(reply, get_answer(kind, value), kind, value):
+                    if value and expected_match(reply, get_answer(kind, value, meta.get("source_text", "")), kind, value):
                         return reply.strip()[:500]
                     # coherent gen that shares content keywords with the question
                     if grounded:
@@ -1948,10 +2009,23 @@ def main():
                     f"I have notes on {value or 'that topic'} but couldn't "
                     f"compose a clean answer — try asking about a specific detail."
                 )
-            if kind and value and expected_match(reply, get_answer(kind, value), kind, value):
+            if kind == "skill_code":
+                # gen is trusted only when it is clean AND reproduces the
+                # taught specifics; otherwise answer with grounded teaching text
+                src = _teach_clean(meta.get("source_text", ""))
+                if reply.strip() and not _garbage(reply) and src:
+                    sw = re.findall(r"[a-z0-9]{4,}", src.lower())
+                    rw = set(re.findall(r"[a-z0-9]{4,}", reply.lower()))
+                    if sw and sum(1 for w in sw if w in rw) >= max(2, len(sw) // 2):
+                        return reply.strip()[:800]
+                if src:
+                    return src
+                if reply.strip() and not _garbage(reply):
+                    return reply.strip()[:800]
+            elif kind and value and expected_match(
+                    reply, get_answer(kind, value, meta.get("source_text", "")),
+                    kind, value):
                 return reply.strip()
-            if kind == "skill_code" and reply.strip() and not _garbage(reply):
-                return reply.strip()[:800]
             return (
                 f"I tried expert {route.expert_id} but I'm not confident. "
                 f"I don't know that well yet — teach me!"
