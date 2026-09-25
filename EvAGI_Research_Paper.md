@@ -426,9 +426,9 @@ for attempt in range(4):
 
 ---
 
-## 7. Training Mechanics (Why ~10 s Today, and the Path to Instant)
+## 7. Training Mechanics (Dense ~10–19 s, Instant ~0.7 s)
 
-### 7.1 What runs when a fact is learned
+### 7.1 What runs when a fact is learned (dense mask path)
 
 | Step | Cost today | Notes |
 |------|------------|-------|
@@ -437,19 +437,30 @@ for attempt in range(4):
 | Probe generation | ~10% | 3 × ~64-token decode |
 | Governor / hooks / Python | small | |
 
-Updating 4 neurons (≈24.6K weights) is microseconds; the wall clock is *computing the gradient context* through 1.17B frozen parameters.
+Updating 4 neurons (≈24.6K weights) is microseconds; the wall clock is *computing the gradient context* through 1.17B frozen parameters. The instant path (7.2) removes this cost entirely.
 
-### 7.2 Projected plug-and-play (Layer 0/1 target design)
+### 7.2 Plug-and-play (IMPLEMENTED — instant path)
 
 To make training **milliseconds**, detach experts from the base graph:
 
 ```
 base forward (no_grad) → cached hidden h_L
-expert = small module on h_L   (additive delta / adapter)
+expert = small module on h_L   (residual bottleneck adapter on final hidden)
 loss(expert(h_L)) → backward ONLY through expert
 ```
 
-This is **not** skipping learning — it is skipping *base* F+B. Base remains a frozen feature extractor; experts become true plug-and-play modules the router pages from SSD. That is the intended production shape of EvAGI at frontier scale; the current in-weight hard-mask design is the **correctness prototype** (proves 0% forgetting) and the adapter design is the **performance path** (proves instant learn).
+This is **not** skipping learning — it is skipping *base* F+B. Base remains a frozen feature extractor; experts become true plug-and-play modules the router pages from SSD.
+
+**Measured (RTX 4070, LFM2.5-1.2B, fact_code = ZEBRA-42):**
+
+| Path | Train | Probe (gen) | Total | Recall |
+|------|-------|-------------|-------|--------|
+| Dense in-weight (n=4) | 14.35 s | 9.05 s | 23.4 s | 100% |
+| **Detached adapter (rank 16)** | **0.72 s** | 6.11 s | 6.8 s | **100%** |
+
+**20× train speedup**; pure optimizer steps are ~270 ms (the 0.72 s includes the one-time 445 ms hidden-state cache; probe time is generation, shared by both paths). Adapter = residual bottleneck `h + up(silu(down(h)))` on the final hidden, applied at inference via a `lm_head` pre-hook — **zero FFN weight contact**, so isolation holds by construction. V4-equivalent neuron accounting kept (`2·rank/3`); checkpoint stores only the adapter (~50–80 KB/expert).
+
+**Verified:** instant experts restore in a brand-new process; facts learned instantly stay at 100% after later content learning (0% forgetting); `EVAGI_INSTANT=0` falls back to the dense mask path (unchanged behavior).
 
 ---
 
@@ -475,7 +486,7 @@ Commands exposed: natural teaching, `learn file <path>`, `learn this: <text>`, `
 
 ## 9. Limitations
 
-1. **In-weight training latency (~10 s/fact, ~25 s/content)** due to full-graph F+B; adapter-style experts needed for instant learning (Section 7.2).  
+1. **Probe latency dominates the learn turn (~6 s of generation)** — adapter training itself is now sub-second (Section 7.2); dense mask path (~10–19 s/fact) remains as `EVAGI_INSTANT=0` fallback. Adapter capacity for long-form skills/content not yet swept (rank grows 16→2048 on failure).  
 2. **Skill/content V4 variance (R²=0.675)** — doubling retries add tail latency; content expert uses a hard cap (`inter/4 = 2048`) so probe may accept on loss-with-partial-hit rather than 100% exact prose match.  
 3. **Classifier errors** — questions can be mis-tagged as `learn`; mitigated by post-rules (questions never learn) and source-derived QA prompts, not eliminated.  
 4. **Single-GPU / single-process** — no multi-tenant shard of the register yet.  
@@ -500,7 +511,7 @@ Commands exposed: natural teaching, `learn file <path>`, `learn this: <text>`, `
 
 1. **Behavior-trained base** — fine-tune/RL the base specifically on curiosity (know-what-you-don't-know), learn-intent extraction quality, multi-step problem-solving, and explicit thinking traces; keep facts 100% out of base weights.  
 2. **Layer 2 sub-registers** — local pools under each main neuron; content trees.  
-3. **Detached adapter experts** — instant train (ms) while keeping 0% forgetting.  
+3. ~~**Detached adapter experts**~~ — **DONE**: instant path trains in ~0.7 s (20× vs dense, 0% forgetting, cross-process restore); next is adapter capacity sweep + SSD paging.  
 4. **Classifier turn-memory** — every turn updates routing priors (dynamic, not static few-shot).  
 5. **Batch content ingestion** — books/courses as forests of sub-neurons.  
 6. **Multi-scale register sharding** — frontier parameter counts with constant VRAM.  

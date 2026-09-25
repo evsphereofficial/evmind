@@ -40,6 +40,18 @@ from src.llm_evagi import (
     HRMRouter,
 )
 from src.registry import predict_neurons_v4, next_grid_step
+from src.instant_expert import (
+    AdapterExpert,
+    AdapterCtx,
+    train_instant,
+    equiv_neurons,
+    next_rank,
+    RANK_GRID,
+)
+
+import os
+USE_INSTANT = os.environ.get("EVAGI_INSTANT", "1") != "0"  # 0 = force dense mask path
+INSTANT_LR = 1e-2
 
 MODEL_DIR = Path("models/LFM2.5-1.2B-Instruct")
 CHECKPOINT = Path("models/LFM2.5-1.2B-Instruct/evagi_live.pt")
@@ -709,7 +721,7 @@ def _build_feats(w, g, mask, layer_idx, n_layers, regf):
 
 
 @torch.no_grad()
-def probe_hit_rate(model, tok, probes, answer, kind, value, masks) -> float:
+def probe_hit_rate(model, tok, probes, answer, kind, value, masks, adapter=None) -> float:
     hits = 0
 
     def _looks_ok(s: str) -> bool:
@@ -732,7 +744,13 @@ def probe_hit_rate(model, tok, probes, answer, kind, value, masks) -> float:
 
     for messages, _ in probes:
         pid = encode_prompt(tok, messages).unsqueeze(0).to(DEVICE)
-        with HardSwiGLUMask(model, masks):
+        if adapter is not None:
+            ctx = AdapterCtx(model, adapter)
+        elif masks is not None:
+            ctx = HardSwiGLUMask(model, masks)
+        else:
+            ctx = torch.no_grad()
+        with ctx:
             out = model.generate(
                 input_ids=pid,
                 attention_mask=torch.ones_like(pid),
@@ -884,8 +902,32 @@ def main():
     governors: dict[int, TinyPerExpertGovernor] = {}
     items: dict[str, dict] = {}  # key: kind or f"{kind}:{value}"
     expert_states: dict[int, dict] = {}
+    adapters: dict[int, AdapterExpert] = {}  # instant (detached) experts
     masks_by_expert: dict[int, list] = {}
     base_snap = snapshot_ffn(model)
+
+    # persistent lm_head hook for the active instant expert (None = off)
+    _hook = {"h": None}
+
+    def clear_adapter():
+        if _hook["h"] is not None:
+            _hook["h"].remove()
+            _hook["h"] = None
+
+    def set_adapter_hook(adapter: AdapterExpert):
+        clear_adapter()
+
+        def hook(mod, args):
+            if not args:
+                return args
+            return (adapter(args[0]),)
+
+        _hook["h"] = model.lm_head.register_forward_pre_hook(hook)
+
+    def restore_base():
+        """Base weights clean + no adapter attached."""
+        restore_ffn(model, base_snap)
+        clear_adapter()
 
     # load checkpoint if present
     ck = load_checkpoint(CHECKPOINT)
@@ -917,15 +959,26 @@ def main():
         register.n_captured = reg_s.get("n_captured", 0)
         for k, meta in items.items():
             eid = meta["expert_id"]
-            # rebuild masks from restored ownership (no double-allocate)
-            masks = [
-                (register.ownership[li] == eid) for li in range(n_layers)
-            ]
-            masks_by_expert[eid] = masks
-            governors[eid] = TinyPerExpertGovernor(hidden=12).to(DEVICE)
-            if meta.get("governor"):
-                governors[eid].load_state_dict(meta["governor"])
-                governors[eid].eval()
+            st = expert_states.get(eid) or {}
+            if isinstance(st, dict) and st.get("__adapter__"):
+                # instant (detached) expert — module weights only, no masks
+                ad = AdapterExpert(hidden, int(st["rank"])).to(DEVICE)
+                ad.load_state_dict(
+                    {kk: vv.to(DEVICE) for kk, vv in st["sd"].items()}
+                )
+                ad.eval()
+                adapters[eid] = ad
+                masks_by_expert[eid] = None  # instant marker
+            else:
+                # rebuild masks from restored ownership (no double-allocate)
+                masks = [
+                    (register.ownership[li] == eid) for li in range(n_layers)
+                ]
+                masks_by_expert[eid] = masks
+                governors[eid] = TinyPerExpertGovernor(hidden=12).to(DEVICE)
+                if meta.get("governor"):
+                    governors[eid].load_state_dict(meta["governor"])
+                    governors[eid].eval()
             # support centroid
             centroid = encode_prompt(
                 tok, [{"role": "user", "content": meta.get("probe_text", meta["value"])}]
@@ -935,7 +988,8 @@ def main():
             input_router.register_expert(
                 meta["kind"], meta["value"], eid, emb, title=meta.get("title")
             )
-            print(f"  restored: {k} expert={eid} neurons={meta['n_neurons']}")
+            be = "instant" if eid in adapters else "dense"
+            print(f"  restored: {k} expert={eid} neurons={meta['n_neurons']} [{be}]")
         if ck.get("router_state"):
             try:
                 sd = ck["router_state"]
@@ -969,17 +1023,18 @@ def main():
         qa = make_qa_pairs(kind, value, source_text)
         probes = make_probes(kind, value, source_text)
         # always train from clean base (no prior expert residue)
-        restore_ffn(model, base_snap)
+        restore_base()
 
         print(f"\n[learn] kind={kind} value={value!r} ans_tok={ans_tok} V4_n={n0}")
 
         # free old expert for this key if re-learning
         if key in items:
             old_eid = items[key]["expert_id"]
-            if old_eid in masks_by_expert:
+            if old_eid in masks_by_expert and masks_by_expert[old_eid] is not None:
                 register.deallocate(masks_by_expert[old_eid], old_eid)
             expert_states.pop(old_eid, None)
             governors.pop(old_eid, None)
+            adapters.pop(old_eid, None)
             masks_by_expert.pop(old_eid, None)
             input_router.experts = [
                 e for e in input_router.experts if e["expert_id"] != old_eid
@@ -988,6 +1043,85 @@ def main():
 
         eid = next_eid
         next_eid += 1
+        gov: TinyPerExpertGovernor | None = None
+
+        def _finish_expert(loss, n_shown, backend: str, adapter: AdapterExpert | None = None):
+            """Shared post-train: centroid, router, items, save."""
+            nonlocal router_net
+            probe_text = probes[0][0][0]["content"]
+            with torch.no_grad():
+                ids = encode_prompt(tok, [{"role": "user", "content": probe_text}]).to(DEVICE)
+                centroid = model.model.embed_tokens(ids).mean(0).cpu()
+            input_router.register_expert(kind, value, eid, centroid)
+            if router_net.num_experts <= eid:
+                router_net = expand_router(router_net, eid + 1, DEVICE)
+            router_net.train()
+            router_opt = torch.optim.SGD(router_net.parameters(), lr=0.01)
+            with torch.no_grad():
+                rf = torch.zeros(1, 9, device=DEVICE)
+                rf[0, 3] = min(1.0, float(loss))
+            rlog = router_net(rf)
+            rloss = F.cross_entropy(rlog, torch.tensor([eid], device=DEVICE))
+            router_opt.zero_grad()
+            rloss.backward()
+            torch.nn.utils.clip_grad_norm_(router_net.parameters(), 1.0)
+            router_opt.step()
+            router_net.eval()
+            items[key] = {
+                "kind": kind,
+                "value": value,
+                "expert_id": eid,
+                "n_neurons": int(n_shown),
+                "backend": backend,
+                "final_loss": float(loss),
+                "ans_tokens": ans_tok,
+                "val_tokens": val_tok,
+                "probe_text": probe_text,
+                "source_text": source_text,
+                "learned_at": time.time(),
+            }
+            if adapter is not None:
+                items[key]["rank"] = int(adapter.rank)
+            elif gov is not None:
+                items[key]["governor"] = {k: v.cpu() for k, v in gov.state_dict().items()}
+            save()
+            hits = ", ".join(p[0][0]["content"] for p in probes[:2])
+            return (
+                f"Learned {kind} = {value!r} "
+                f"({n_shown} neurons, loss={loss:.4f}, {backend}). "
+                f"Probes: {hits}"
+            )
+
+        # ---- INSTANT path: detached adapter, no FFN touch ----
+        if USE_INSTANT:
+            rank = 16
+            for attempt in range(MAX_ADAPTIVE_RETRIES):
+                ad = AdapterExpert(hidden, rank).to(DEVICE)
+                t0 = time.time()
+                loss = train_instant(
+                    model, ad, tokenize_qa(tok, qa),
+                    epochs=TRAIN_EPOCHS, lr=INSTANT_LR, batch=BATCH, device=DEVICE,
+                )
+                acc = probe_hit_rate(model, tok, probes, answer, kind, value, None, adapter=ad)
+                dt = time.time() - t0
+                print(f"  instant attempt {attempt+1}: rank={rank} loss={loss:.4f} probe={acc:.0%} ({dt:.2f}s)")
+                if acc >= PROBE_HIT_RATE:
+                    adapters[eid] = ad
+                    expert_states[eid] = {
+                        "__adapter__": True,
+                        "rank": int(rank),
+                        "sd": {k: v.detach().cpu() for k, v in ad.state_dict().items()},
+                    }
+                    masks_by_expert[eid] = None
+                    n_shown = equiv_neurons(hidden, rank)
+                    out = _finish_expert(loss, n_shown, "instant", adapter=ad)
+                    restore_base()
+                    return out
+                if rank >= RANK_GRID[-1]:
+                    break
+                rank = next_rank(rank)
+            print("  instant failed — falling back to dense mask path")
+
         gov = TinyPerExpertGovernor(hidden=12).to(DEVICE)
 
         n = n0
@@ -1014,10 +1148,10 @@ def main():
                 if a.get("expert_id") != eid  # clear this expert's attempts
             ]
             n = next_grid_step(n)
-            restore_ffn(model, base_snap)
+            restore_base()
 
         if not ok:
-            restore_ffn(model, base_snap)
+            restore_base()
             return (
                 f"Could not stabilize '{value}' even at {n} neurons "
                 f"(loss={loss}). Try a shorter answer."
@@ -1044,57 +1178,20 @@ def main():
         masks_by_expert[eid] = masks
         governors[eid] = gov
 
-        # support centroid for Laya-style routing
-        probe_text = probes[0][0][0]["content"]
-        with torch.no_grad():
-            ids = encode_prompt(tok, [{"role": "user", "content": probe_text}]).to(DEVICE)
-            centroid = model.model.embed_tokens(ids).mean(0).cpu()
-        input_router.register_expert(kind, value, eid, centroid)
-
-        # router train step (best-effort)
-        if router_net.num_experts <= eid:
-            router_net = expand_router(router_net, eid + 1, DEVICE)
-        router_net.train()
-        router_opt = torch.optim.SGD(router_net.parameters(), lr=0.01)
-        with torch.no_grad():
-            rf = torch.zeros(1, 9, device=DEVICE)
-            rf[0, 3] = min(1.0, float(loss))
-        rlog = router_net(rf)
-        rloss = F.cross_entropy(rlog, torch.tensor([eid], device=DEVICE))
-        router_opt.zero_grad()
-        rloss.backward()
-        torch.nn.utils.clip_grad_norm_(router_net.parameters(), 1.0)
-        router_opt.step()
-        router_net.eval()
-
-        # restore OTHER experts' weights: we trained on top of base + this expert
-        # only. After install, put base back and remember this expert's delta
-        # (applied on demand at recall). For same-session multi-expert, union
-        # is approximate: apply this expert, leave applied until next learn.
-        items[key] = {
-            "kind": kind,
-            "value": value,
-            "expert_id": eid,
-            "n_neurons": int(sum(counts_from_masks(masks))),
-            "final_loss": float(loss),
-            "ans_tokens": ans_tok,
-            "val_tokens": val_tok,
-            "probe_text": probe_text,
-            "source_text": source_text,
-            "governor": {k: v.cpu() for k, v in gov.state_dict().items()},
-            "learned_at": time.time(),
-        }
-        save()
-        hits = ", ".join(p[0][0]["content"] for p in probes[:2])
-        return (
-            f"Learned {kind} = {value!r} "
-            f"({items[key]['n_neurons']} neurons, loss={loss:.4f}). "
-            f"Probes: {hits}"
-        )
+        out = _finish_expert(loss, int(sum(counts_from_masks(masks))), "dense")
+        restore_base()
+        return out
 
     def apply_expert(eid: int):
-        """Load sparse expert delta on top of base for recall."""
-        apply_sparse_expert(model, base_snap, expert_states.get(eid) or {}, n_layers)
+        """Load expert for recall: dense = sparse FFN delta, instant = adapter hook."""
+        st = expert_states.get(eid) or {}
+        restore_base()
+        if st.get("__adapter__"):
+            ad = adapters.get(eid)
+            if ad is not None:
+                set_adapter_hook(ad)
+            return
+        apply_sparse_expert(model, base_snap, st, n_layers)
 
     def learn_content(text: str, topic: str = "") -> str:
         """Ingest free-form content (file body, pasted lore, docs).
@@ -1161,10 +1258,11 @@ def main():
         key = f"content:{topic.lower()[:80]}"
         if key in items:
             old_eid = items[key]["expert_id"]
-            if old_eid in masks_by_expert:
+            if masks_by_expert.get(old_eid) is not None:
                 register.deallocate(masks_by_expert[old_eid], old_eid)
             expert_states.pop(old_eid, None)
             governors.pop(old_eid, None)
+            adapters.pop(old_eid, None)
             masks_by_expert.pop(old_eid, None)
             input_router.experts = [
                 e for e in input_router.experts if e["expert_id"] != old_eid
@@ -1174,8 +1272,73 @@ def main():
         nonlocal next_eid, router_net
         eid = next_eid
         next_eid += 1
+        restore_base()
+
+        def _finish_content(loss, n_shown, adapter: AdapterExpert | None):
+            nonlocal router_net
+            probe_text = probes[0][0][0]["content"]
+            with torch.no_grad():
+                ids = encode_prompt(tok, [{"role": "user", "content": probe_text}]).to(DEVICE)
+                centroid = model.model.embed_tokens(ids).mean(0).cpu()
+            input_router.register_expert("knowledge", topic, eid, centroid, title=topic)
+            if router_net.num_experts <= eid:
+                router_net = expand_router(router_net, eid + 1, DEVICE)
+            items[key] = {
+                "kind": "knowledge",
+                "value": topic,
+                "expert_id": eid,
+                "n_neurons": int(n_shown),
+                "backend": "instant" if adapter is not None else "dense",
+                "final_loss": float(loss),
+                "ans_tokens": ans_tok,
+                "val_tokens": val_tok,
+                "probe_text": probe_text,
+                "title": topic,
+                "sentences": sentences[:12],
+                "summary": summary[:300],
+                "learned_at": time.time(),
+                "content_preview": sentences[0][:200],
+                "n_sentences": len(sentences),
+            }
+            if adapter is not None:
+                items[key]["rank"] = int(adapter.rank)
+            elif gov is not None:
+                items[key]["governor"] = {k: v.cpu() for k, v in gov.state_dict().items()}
+            save()
+
+        # ---- INSTANT path for content too (adapter rank grows on fail) ----
+        if USE_INSTANT:
+            rank = 64
+            for attempt in range(MAX_ADAPTIVE_RETRIES):
+                ad = AdapterExpert(hidden, rank).to(DEVICE)
+                t0 = time.time()
+                loss = train_instant(
+                    model, ad, tokenize_qa(tok, qa),
+                    epochs=max(40, TRAIN_EPOCHS), lr=INSTANT_LR, batch=BATCH, device=DEVICE,
+                )
+                acc = probe_hit_rate(model, tok, probes, answer, "knowledge", topic, None, adapter=ad)
+                dt = time.time() - t0
+                print(f"  instant attempt {attempt+1}: rank={rank} loss={loss:.4f} probe={acc:.0%} ({dt:.2f}s)")
+                if acc >= 0.34 or (loss < 1.5 and acc > 0):
+                    adapters[eid] = ad
+                    expert_states[eid] = {
+                        "__adapter__": True,
+                        "rank": int(rank),
+                        "sd": {k: v.detach().cpu() for k, v in ad.state_dict().items()},
+                    }
+                    masks_by_expert[eid] = None
+                    _finish_content(loss, equiv_neurons(hidden, rank), ad)
+                    return (
+                        f"Learned content about {topic!r}: {len(sentences)} sentences, "
+                        f"{equiv_neurons(hidden, rank)} neurons, loss={loss:.4f} (instant). "
+                        f"Ask me anything about it."
+                    )
+                if rank >= RANK_GRID[-1]:
+                    break
+                rank = next_rank(rank)
+            print("  instant failed — falling back to dense mask path")
+
         gov = TinyPerExpertGovernor(hidden=12).to(DEVICE)
-        restore_ffn(model, base_snap)
 
         print(f"\n[learn_content] topic={topic!r} sentences={len(sentences)} V4_n={n0} cap={n_cap}")
         n = n0
@@ -1209,15 +1372,15 @@ def main():
                     break
                 register.deallocate(masks, eid)
                 register.allocations = [a for a in register.allocations if a.get("expert_id") != eid]
-                restore_ffn(model, base_snap)
+                restore_base()
                 return f"Could not stabilize content for '{topic}' (loss={loss}, cap={n_cap})."
             register.deallocate(masks, eid)
             register.allocations = [a for a in register.allocations if a.get("expert_id") != eid]
             n = next_grid_step(n)
-            restore_ffn(model, base_snap)
+            restore_base()
 
         if not ok:
-            restore_ffn(model, base_snap)
+            restore_base()
             return f"Could not stabilize content for '{topic}' (loss={loss})."
 
         with torch.no_grad():
@@ -1234,34 +1397,8 @@ def main():
         masks_by_expert[eid] = masks
         governors[eid] = gov
 
-        probe_text = probes[0][0][0]["content"]
-        with torch.no_grad():
-            ids = encode_prompt(tok, [{"role": "user", "content": probe_text}]).to(DEVICE)
-            centroid = model.model.embed_tokens(ids).mean(0).cpu()
-        input_router.register_expert("knowledge", topic, eid, centroid, title=topic)
-
-        if router_net.num_experts <= eid:
-            router_net = expand_router(router_net, eid + 1, DEVICE)
-
-        items[key] = {
-            "kind": "knowledge",
-            "value": topic,
-            "expert_id": eid,
-            "n_neurons": int(sum(counts_from_masks(masks))),
-            "final_loss": float(loss),
-            "ans_tokens": ans_tok,
-            "val_tokens": val_tok,
-            "probe_text": probe_text,
-            "title": topic,
-            "sentences": sentences[:12],
-            "summary": summary[:300],
-            "governor": {k: v.cpu() for k, v in gov.state_dict().items()},
-            "learned_at": time.time(),
-            "content_preview": sentences[0][:200],
-            "n_sentences": len(sentences),
-        }
-        save()
-        restore_ffn(model, base_snap)
+        _finish_content(loss, int(sum(counts_from_masks(masks))), None)
+        restore_base()
         return (
             f"Learned content about {topic!r}: {len(sentences)} sentences, "
             f"{items[key]['n_neurons']} neurons, loss={loss:.4f}. "
@@ -1322,17 +1459,21 @@ def main():
         low = text.lower().strip()
         fact_field_hit = None
         if "?" in text or re.match(r"^(what|who|tell me|remind|do you|can you)", low):
-            # also match natural field heads stored from source ("office code")
-            extra_heads = []
-            for m in items.values():
-                if m["kind"].startswith("fact_") and m.get("source_text"):
-                    mm = re.match(r"^(?:my|the)\s+(.+?)\s+is\s+", m["source_text"].strip().rstrip(".!?"), re.I)
-                    if mm:
-                        extra_heads.append(mm.group(1).strip().lower())
             for kind in learned_kinds:
                 if not kind.startswith("fact_"):
                     continue
                 field = kind.split("_", 1)[1].lower()
+                # natural field heads stored from THIS item's source only
+                # ("office code" from "My office code is ZEBRA-42")
+                extra_heads = []
+                for m in items.values():
+                    if m["kind"] == kind and m.get("source_text"):
+                        mm = re.match(
+                            r"^(?:my|the)\s+(.+?)\s+is\s+",
+                            m["source_text"].strip().rstrip(".!?"), re.I,
+                        )
+                        if mm:
+                            extra_heads.append(mm.group(1).strip().lower())
                 fields = [field] + [h for h in extra_heads if h]
                 hit = None
                 for f in fields:
@@ -1644,7 +1785,7 @@ def main():
                     if not deduped or tk.lower() != deduped[-1].lower():
                         deduped.append(tk)
                 reply = " ".join(deduped)
-                restore_ffn(model, base_snap)
+                restore_base()
                 if value and expected_match(raw, get_answer(kind, value), kind, value):
                     return value
                 if value and expected_match(reply, get_answer(kind, value), kind, value):
@@ -1652,7 +1793,7 @@ def main():
                 # if raw already matched but deduped lost it, return value
                 if value and norm_val in norm_raw:
                     return value
-                restore_ffn(model, base_snap)
+                restore_base()
                 # still verify raw
                 if value and expected_match(raw, get_answer(kind, value), kind, value):
                     return value
@@ -1662,7 +1803,7 @@ def main():
                 )
             # skill / knowledge query — prefer masked generation; ground if weak
             reply = generate_with_experts(model, tok, messages, [masks] if masks else [])
-            restore_ffn(model, base_snap)
+            restore_base()
             if kind == "knowledge":
                 grounded = _grounded_content(text)
                 # If masked gen is coherent AND relevant, use it; else grounded notes.
@@ -1700,7 +1841,7 @@ def main():
             )
 
         # chat: base model, no mask
-        restore_ffn(model, base_snap)
+        restore_base()
         messages = [{"role": "user", "content": text}]
         reply = generate_with_experts(model, tok, messages, [])
         # trim runaway chat
