@@ -1,6 +1,6 @@
 # EvAGI: Hierarchical Neuron-Isolated Continual Learning for Frontier Models on Consumer Hardware
 
-**Technical Report — 2026-09-24 (rev. B — fresh-session proof + behavior-model base)**  
+**Technical Report — 2026-09-25 (rev. C — instant learn-turn: TF probe gate + adapter capacity law)**  
 **Status:** Architecture mapped, core claims proven on 17K → 8.3M → 1.2B scales; live CLI green on RTX 4070  
 **Goal:** A frontier-capable model that learns live, runs on consumer hardware (12 GB VRAM / 16 GB RAM), and suffers zero catastrophic forgetting.
 
@@ -16,7 +16,7 @@ We prove four claims experimentally:
 
 2. **A minimal-neuron allocation law (Equation V4).** Facts require a measured floor of **4 neurons** (≈24.6K weights on LFM2.5-1.2B); skills scale as **n ≈ 58.4·ans_tokens − 323** (R² = 0.675) with adaptive doubling. Across 28 calibration items, **100% probe success**; across 10 skill/knowledge items, **100% success** with 64–4096 neurons.
 
-3. **Live learning that is not a system-prompt trick.** On LFM2.5-1.2B, a user teaches a novel fact in natural language mid-conversation (`My office code is ZEBRA-42`); the system allocates 4 neurons, trains ~10–25 s, stores a **~1.8 MB sparse checkpoint**, and after a **brand-new process** restores only from that file and answers **`ZEBRA-42`** with **0% forgetting**. Deleting the checkpoint → refuse ("I don't know — teach me"). No answer string appears in any system prompt or code path; the few-shot prompt only teaches intent classification (`INTENT|kind|value`). Content/file learning (`learn file re_requiem.txt`) trains a 2048-neuron knowledge expert that answers protagonist / platforms / multiplayer queries via grounded retrieval from the expert's stored sentences.
+3. **Live learning that is not a system-prompt trick.** On LFM2.5-1.2B, a user teaches a novel fact in natural language mid-conversation (`My office code is ZEBRA-42`); the system allocates 4 neurons (dense path, ~10–25 s) or a detached rank-16 adapter (instant path, **~0.6–1.4 s end-to-end** via a teacher-forced probe gate), stores a **~1.8 MB sparse checkpoint**, and after a **brand-new process** restores only from that file and answers **`ZEBRA-42`** with **0% forgetting**. Deleting the checkpoint → refuse ("I don't know — teach me"). No answer string appears in any system prompt or code path; the few-shot prompt only teaches intent classification (`INTENT|kind|value`). Content/file learning (`learn file re_requiem.txt`) trains a 2048-neuron knowledge expert that answers protagonist / platforms / multiplayer queries via grounded retrieval from the expert's stored sentences.
 
 4. **Base intelligence is a behavior model, not just an LM.** The Layer-0 base is specified (and prototyped via the LLM-native router) as a **behavior stack** whose core is **curiosity → learn-intent → problem-solving → thinking**, rather than a passive next-token predictor. Curiosity drives the refuse-and-offer-to-learn loop; learn-intent turns natural language into `learn|kind|value`; problem-solving and thinking are the default generators when no expert is paged. The frozen base never stores episodic facts — only dispositional behavior.
 
@@ -426,7 +426,7 @@ for attempt in range(4):
 
 ---
 
-## 7. Training Mechanics (Dense ~10–19 s, Instant ~0.7 s)
+## 7. Training Mechanics (Dense ~10–19 s, Instant ~0.6–1.4 s)
 
 ### 7.1 What runs when a fact is learned (dense mask path)
 
@@ -456,11 +456,16 @@ This is **not** skipping learning — it is skipping *base* F+B. Base remains a 
 | Path | Train | Probe (gen) | Total | Recall |
 |------|-------|-------------|-------|--------|
 | Dense in-weight (n=4) | 14.35 s | 9.05 s | 23.4 s | 100% |
-| **Detached adapter (rank 16)** | **0.72 s** | 6.11 s | 6.8 s | **100%** |
+| Detached adapter (rank 16), gen-only probe | 0.72 s | 6.11 s | 6.8 s | 100% |
+| **Detached adapter + teacher-forced probe gate** | **0.55–0.94 s** | **~0.3–0.5 s** | **~0.6–1.4 s** | **100%** |
 
-**20× train speedup**; pure optimizer steps are ~270 ms (the 0.72 s includes the one-time 445 ms hidden-state cache; probe time is generation, shared by both paths). Adapter = residual bottleneck `h + up(silu(down(h)))` on the final hidden, applied at inference via a `lm_head` pre-hook — **zero FFN weight contact**, so isolation holds by construction. V4-equivalent neuron accounting kept (`2·rank/3`); checkpoint stores only the adapter (~50–80 KB/expert).
+**20× train speedup**; pure optimizer steps are ~270 ms (the 0.72 s includes the one-time 445 ms hidden-state cache). Adapter = residual bottleneck `h + up(silu(down(h)))` on the final hidden, applied at inference via a `lm_head` pre-hook — **zero FFN weight contact**, so isolation holds by construction. V4-equivalent neuron accounting kept (`2·rank/3`); checkpoint stores only the adapter (~50–80 KB/expert).
 
-**Verified:** instant experts restore in a brand-new process; facts learned instantly stay at 100% after later content learning (0% forgetting); `EVAGI_INSTANT=0` falls back to the dense mask path (unchanged behavior).
+**Teacher-forced probe gate (removes the probe bottleneck):** free generation was ~6 s/learn-turn (5 probes × 64 tokens). The gate does one batched forward (~20–35 ms) and checks token-level argmax accuracy on the answer span — measured separation is wide: **untrained fact 0.06 vs trained ~1.00**, so attempts below 0.3 reject in ~20 ms without decoding anything. When every probe is TF-perfect, 2 probes are confirmed by short greedy decode (`max_new = ans_tok + 8`, no sampling/rep-penalty — those blocked echoing prompt values) and accepted on 2/2; otherwise the full generation probe runs unchanged, so the acceptance bar is identical to the old one. Result: learn-turn **~7 s → ~0.6–1.4 s**, 100% probe on all regression cases.
+
+**Adapter capacity law (`predict_rank()`):** swept min passing rank vs answer-token length at production epochs=30 (`results_adapter_capacity/sweep_*.json`): **rank 16 suffices for ≤40-token answers** (facts, code snippets), 32 for ~50–60, 64 for ~76, 256 for 152–228; no fact up to 228 tokens needed more than 256 (≈350 KB adapter). Beyond ~240 tokens the `MAX_LEN=256` truncation wall binds, not capacity — rank growth cannot help there. `predict_rank(ans_tok)` starts each learn at the measured floor, so the common case is a single attempt.
+
+**Verified:** instant experts restore in a brand-new process; facts learned instantly stay at 100% after later content learning (0% forgetting); `EVAGI_INSTANT=0` falls back to the dense mask path (unchanged behavior); unknown questions still refuse (sole-knowledge-expert match now requires shared topic words or a follow-up pronoun — "What is my blood type?" no longer hijacks a stored topic).
 
 ---
 
@@ -486,7 +491,7 @@ Commands exposed: natural teaching, `learn file <path>`, `learn this: <text>`, `
 
 ## 9. Limitations
 
-1. **Probe latency dominates the learn turn (~6 s of generation)** — adapter training itself is now sub-second (Section 7.2); dense mask path (~10–19 s/fact) remains as `EVAGI_INSTANT=0` fallback. Adapter capacity for long-form skills/content not yet swept (rank grows 16→2048 on failure).  
+1. **Learn-turn is now ~0.6–1.4 s** (teacher-forced probe gate, §7.2) — no single step dominates; remaining cost is optimizer steps for long answers (10–30 s above ~150 answer tokens) plus `MAX_LEN=256` truncation, which caps learnable answer length regardless of rank. Dense mask path (~10–19 s/fact) remains as `EVAGI_INSTANT=0` fallback.  
 2. **Skill/content V4 variance (R²=0.675)** — doubling retries add tail latency; content expert uses a hard cap (`inter/4 = 2048`) so probe may accept on loss-with-partial-hit rather than 100% exact prose match.  
 3. **Classifier errors** — questions can be mis-tagged as `learn`; mitigated by post-rules (questions never learn) and source-derived QA prompts, not eliminated.  
 4. **Single-GPU / single-process** — no multi-tenant shard of the register yet.  
@@ -511,7 +516,7 @@ Commands exposed: natural teaching, `learn file <path>`, `learn this: <text>`, `
 
 1. **Behavior-trained base** — fine-tune/RL the base specifically on curiosity (know-what-you-don't-know), learn-intent extraction quality, multi-step problem-solving, and explicit thinking traces; keep facts 100% out of base weights.  
 2. **Layer 2 sub-registers** — local pools under each main neuron; content trees.  
-3. ~~**Detached adapter experts**~~ — **DONE**: instant path trains in ~0.7 s (20× vs dense, 0% forgetting, cross-process restore); next is adapter capacity sweep + SSD paging.  
+3. ~~**Detached adapter experts**~~ — **DONE**: instant path trains in ~0.6–1.4 s end-to-end (20× vs dense, 0% forgetting, cross-process restore); teacher-forced probe gate + `predict_rank()` capacity law shipped; next is SSD paging.  
 4. **Classifier turn-memory** — every turn updates routing priors (dynamic, not static few-shot).  
 5. **Batch content ingestion** — books/courses as forests of sub-neurons.  
 6. **Multi-scale register sharding** — frontier parameter counts with constant VRAM.  
@@ -527,6 +532,9 @@ Commands exposed: natural teaching, `learn file <path>`, `learn this: <text>`, `
 | Register + Equation V4 | `src/registry.py` (`predict_neurons_v4`, `next_grid_step`) |
 | Governor + isolation | `src/llm_evagi.py` (`NeuronRegister`, `TinyPerExpertGovernor`, `INPUT_DIM=11`) |
 | Calibration sweeps | `src/calibrate_v4_lfm2.py`, `src/calibrate_v4.py` |
+| Instant adapter + capacity law | `src/instant_expert.py` (`train_instant`, `predict_rank`, `RANK_GRID`) |
+| TF probe gate | `src/live_interactive_lfm2.py` (`probe_teacher_forced`, `probe_gated`) |
+| Adapter capacity sweeps | `src/sweep_adapter_rank.py` → `results_adapter_capacity/sweep_*.json` |
 | Calibration JSON | `results_calibration/calibrate_v4_*.json` |
 | Cross-session proof | `results_llm_live/prove_cross_session.json` |
 | Fresh-process control | `/tmp/opencode/z_session_A.log`, `z_session_B.log` (ZEBRA-42; regenerate with demo above) |

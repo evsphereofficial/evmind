@@ -1,0 +1,170 @@
+{
+  "fit": {
+    "a": 0.0,
+    "b": 16.0,
+    "r2": 1.0
+  },
+  "wall_s": 15.9,
+  "rows": [
+    {
+      "kind": "fact_name",
+      "value": "Zara",
+      "ans_tok": 2,
+      "base_acc": 0.0,
+      "attempts": [
+        {
+          "rank": 16,
+          "loss": 0.0,
+          "acc": 1.0,
+          "hit": true,
+          "train_s": 0.29,
+          "probe_s": 0.37
+        }
+      ],
+      "min_rank": 16,
+      "train_s": 0.29
+    },
+    {
+      "kind": "fact_code",
+      "value": "ZEBRA-42",
+      "ans_tok": 5,
+      "base_acc": 0.0,
+      "attempts": [
+        {
+          "rank": 16,
+          "loss": 9e-05,
+          "acc": 1.0,
+          "hit": true,
+          "train_s": 0.34,
+          "probe_s": 0.36
+        }
+      ],
+      "min_rank": 16,
+      "train_s": 0.34
+    },
+    {
+      "kind": "fact_name",
+      "value": "Bartholomew",
+      "ans_tok": 3,
+      "base_acc": 0.0,
+      "attempts": [
+        {
+          "rank": 16,
+          "loss": 0.00087,
+          "acc": 1.0,
+          "hit": true,
+          "train_s": 0.24,
+          "probe_s": 0.32
+        }
+      ],
+      "min_rank": 16,
+      "train_s": 0.24
+    },
+    {
+      "kind": "fact_interest",
+      "value": "vintage cameras and film photography",
+      "ans_tok": 5,
+      "base_acc": 0.0,
+      "attempts": [
+        {
+          "rank": 16,
+          "loss": 0.00099,
+          "acc": 1.0,
+          "hit": true,
+          "train_s": 0.21,
+          "probe_s": 0.44
+        }
+      ],
+      "min_rank": 16,
+      "train_s": 0.21
+    },
+    {
+      "kind": "fact_note",
+      "value": "the meeting room is on floor 3 near the east wing",
+      "ans_tok": 12,
+      "base_acc": 0.0,
+      "attempts": [
+        {
+          "rank": 16,
+          "loss": 0.00155,
+          "acc": 1.0,
+          "hit": true,
+          "train_s": 0.22,
+          "probe_s": 0.58
+        }
+      ],
+      "min_rank": 16,
+      "train_s": 0.22
+    },
+    {
+      "kind": "fact_note",
+      "value": "deploy key lives in the vault under rotation every 90 days",
+      "ans_tok": 12,
+      "base_acc": 0.0,
+      "attempts": [
+        {
+          "rank": 16,
+          "loss": 0.00539,
+          "acc": 1.0,
+          "hit": true,
+          "train_s": 0.22,
+          "probe_s": 0.57
+        }
+      ],
+      "min_rank": 16,
+      "train_s": 0.22
+    },
+    {
+      "kind": "fact_note",
+      "value": "the quarterly review deck is due the second friday of each month",
+      "ans_tok": 14,
+      "base_acc": 0.0,
+      "attempts": [
+        {
+          "rank": 16,
+          "loss": 0.0024,
+          "acc": 1.0,
+          "hit": true,
+          "train_s": 0.23,
+          "probe_s": 0.64
+        }
+      ],
+      "min_rank": 16,
+      "train_s": 0.23
+    },
+    {
+      "kind": "fact_note",
+      "value": "warehouse bay 12 is reserved for cold-chain shipments until further notice",
+      "ans_tok": 15,
+      "base_acc": 0.0,
+      "attempts": [
+        {
+          "rank": 16,
+          "loss": 0.0037,
+          "acc": 1.0,
+          "hit": true,
+          "train_s": 0.24,
+          "probe_s": 0.64
+        }
+      ],
+      "min_rank": 16,
+      "train_s": 0.24
+    },
+    {
+      "kind": "skill_code",
+      "value": "reverse a string in Python",
+      "ans_tok": 29,
+      "base_acc": 1.0,
+      "attempts": [],
+      "min_rank": "base-knows"
+    },
+    {
+      "kind": "knowledge",
+      "value": "quantum entanglement",
+      "ans_tok": 3,
+      "base_acc": 1.0,
+      "attempts": [],
+      "min_rank": "base-knows"
+    }
+  ]
+}

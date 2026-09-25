@@ -1,0 +1,20 @@
+[
+  {
+    "ans_tok": 33,
+    "base": 0.0,
+    "value": "the offline replica lives in the frankfurt region and must be promoted",
+    "min_rank": 16
+  },
+  {
+    "ans_tok": 34,
+    "base": 0.0,
+    "value": "every pull request touching the ingestion pipeline requires a second r",
+    "min_rank": 16
+  },
+  {
+    "ans_tok": 34,
+    "base": 0.0,
+    "value": "the customer escalation channel answers only to severity one incidents",
+    "min_rank": 16
+  }
+]

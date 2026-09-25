@@ -46,6 +46,7 @@ from src.instant_expert import (
     train_instant,
     equiv_neurons,
     next_rank,
+    predict_rank,
     RANK_GRID,
 )
 
@@ -727,7 +728,7 @@ def probe_hit_rate(model, tok, probes, answer, kind, value, masks, adapter=None)
     def _looks_ok(s: str) -> bool:
         # facts are often 1-word ("Rehan") — spam checks only matter for prose
         w = s.split()
-        if kind.startswith("fact_"):
+        if kind.startswith(("fact_", "skill_")):
             return bool(w)
         if len(w) < 2:
             return False
@@ -742,6 +743,7 @@ def probe_hit_rate(model, tok, probes, answer, kind, value, masks, adapter=None)
             return False
         return True
 
+    ans_tok = len(tok(answer, add_special_tokens=False)["input_ids"])
     for messages, _ in probes:
         pid = encode_prompt(tok, messages).unsqueeze(0).to(DEVICE)
         if adapter is not None:
@@ -750,22 +752,123 @@ def probe_hit_rate(model, tok, probes, answer, kind, value, masks, adapter=None)
             ctx = HardSwiGLUMask(model, masks)
         else:
             ctx = torch.no_grad()
+        # greedy: matches the TF argmax gate (sampling + rep-penalty used to
+        # block echoing values that appear in the prompt); decode only about as
+        # long as the trained answer + margin (cap must exceed ans_tok!)
+        max_new = min(256, ans_tok + 8)
         with ctx:
             out = model.generate(
                 input_ids=pid,
                 attention_mask=torch.ones_like(pid),
-                max_new_tokens=64,
-                temperature=0.1,
-                top_p=0.9,
-                do_sample=True,
-                repetition_penalty=1.2,
-                no_repeat_ngram_size=3,
+                max_new_tokens=max_new,
+                do_sample=False,
                 pad_token_id=tok.pad_token_id if tok.pad_token_id is not None else 0,
             )
         text = tok.decode(out[0][pid.size(1) :], skip_special_tokens=True)
         if expected_match(text, answer, kind, value) and _looks_ok(text):
             hits += 1
     return hits / max(len(probes), 1)
+
+
+@torch.no_grad()
+def probe_teacher_forced(
+    model, tok, probes, answer, kind, value, masks=None, adapter=None,
+) -> tuple[float, list[bool]]:
+    """Fast gate: one batched forward, NO generation.
+
+    Returns (token-level accuracy over all answer positions,
+    per-probe bools = every answer token argmax-correct).
+    ~20-50ms vs ~1-2s free generation. Free-gen probe remains the final
+    arbiter; this only fast-rejects hopeless attempts.
+    """
+    from contextlib import nullcontext as nullctx
+    a_ids = encode_answer(tok, answer)
+    ids_l, lab_l, mask_l = [], [], []
+    for messages, _ in probes:
+        p = encode_prompt(tok, messages)
+        ids = torch.cat([p, a_ids])[:MAX_LEN]
+        lab = ids.clone()
+        lab[: len(p)] = -100
+        ids_l.append(ids)
+        lab_l.append(lab)
+        mask_l.append(torch.ones_like(ids))
+    maxl = max(len(x) for x in ids_l)
+    pad = tok.pad_token_id if tok.pad_token_id is not None else 0
+    input_ids = torch.stack(
+        [F.pad(x, (0, maxl - len(x)), value=pad) for x in ids_l]
+    ).to(DEVICE)
+    attention_mask = torch.stack(
+        [F.pad(x, (0, maxl - len(x)), value=0) for x in mask_l]
+    ).to(DEVICE)
+    labels = torch.stack(
+        [F.pad(x, (0, maxl - len(x)), value=-100) for x in lab_l]
+    ).to(DEVICE)
+
+    if adapter is not None:
+        ctx = AdapterCtx(model, adapter)
+    elif masks is not None:
+        ctx = HardSwiGLUMask(model, masks)
+    else:
+        ctx = nullctx()
+    with ctx:
+        logits = model(
+            input_ids=input_ids, attention_mask=attention_mask
+        ).logits
+    # position t predicts t+1
+    pred = logits[:, :-1].argmax(-1)   # [B, T-1]
+    gold = labels[:, 1:]               # [B, T-1]
+    hits = []
+    tot = corr = 0
+    for i in range(len(probes)):
+        m = gold[i] != -100
+        n = int(m.sum())
+        c = int((pred[i][m] == gold[i][m]).sum())
+        tot += n
+        corr += c
+        hits.append(n > 0 and c == n)
+    frac = corr / max(tot, 1)
+    return frac, hits
+
+
+def probe_gated(
+    model, tok, probes, answer, kind, value, masks=None, adapter=None,
+    threshold: float = 1.0,
+) -> float:
+    """Learn-time probe: teacher-forced gate first, free-gen only when needed.
+
+    Facts/skills (threshold=1.0), calibrated on measured TF token-accuracy:
+      TF frac < 0.3            -> reject fast (untrained fact sits at 0.06,
+                                  trained at ~1.0; failed attempts ~20ms)
+      all probes TF-perfect    -> confirm 2 by generation; accept on 2/2
+      otherwise                -> full generation probe (old bar exactly)
+    Content (threshold<1): TF only accelerates (never rejects — title-surface
+    matches can pass with low TF); confirm on TF-perfect probes, else full.
+    """
+    tf_frac, hits = probe_teacher_forced(
+        model, tok, probes, answer, kind, value, masks=masks, adapter=adapter
+    )
+    perfect = [i for i, h in enumerate(hits) if h]
+    if threshold >= 1.0:
+        if tf_frac < 0.3:
+            return 0.0  # hopeless — skip generation entirely
+        if perfect and len(perfect) == len(probes):
+            acc2 = probe_hit_rate(
+                model, tok, [probes[i] for i in perfect[:2]],
+                answer, kind, value, masks, adapter=adapter,
+            )
+            if acc2 >= 1.0:
+                return 1.0
+            # confirm disagreed with TF — pay for the full probe
+        return probe_hit_rate(model, tok, probes, answer, kind, value, masks, adapter=adapter)
+    # content: no fast-reject
+    if perfect:
+        acc2 = probe_hit_rate(
+            model, tok, [probes[i] for i in perfect[:2]],
+            answer, kind, value, masks, adapter=adapter,
+        )
+        if acc2 >= threshold:
+            return acc2
+    return probe_hit_rate(model, tok, probes, answer, kind, value, masks, adapter=adapter)
 
 
 @torch.no_grad()
@@ -1094,7 +1197,7 @@ def main():
 
         # ---- INSTANT path: detached adapter, no FFN touch ----
         if USE_INSTANT:
-            rank = 16
+            rank = predict_rank(ans_tok)
             for attempt in range(MAX_ADAPTIVE_RETRIES):
                 ad = AdapterExpert(hidden, rank).to(DEVICE)
                 t0 = time.time()
@@ -1102,7 +1205,7 @@ def main():
                     model, ad, tokenize_qa(tok, qa),
                     epochs=TRAIN_EPOCHS, lr=INSTANT_LR, batch=BATCH, device=DEVICE,
                 )
-                acc = probe_hit_rate(model, tok, probes, answer, kind, value, None, adapter=ad)
+                acc = probe_gated(model, tok, probes, answer, kind, value, None, adapter=ad)
                 dt = time.time() - t0
                 print(f"  instant attempt {attempt+1}: rank={rank} loss={loss:.4f} probe={acc:.0%} ({dt:.2f}s)")
                 if acc >= PROBE_HIT_RATE:
@@ -1134,7 +1237,7 @@ def main():
 
             t0 = time.time()
             loss = train_expert(model, tok, qa, masks, gov, register, DEVICE)
-            acc = probe_hit_rate(model, tok, probes, answer, kind, value, masks)
+            acc = probe_gated(model, tok, probes, answer, kind, value, masks)
             dt = time.time() - t0
             print(f"  attempt {attempt+1}: n={used} loss={loss:.4f} probe={acc:.0%} ({dt:.1f}s)")
             if acc >= PROBE_HIT_RATE:
@@ -1308,7 +1411,7 @@ def main():
 
         # ---- INSTANT path for content too (adapter rank grows on fail) ----
         if USE_INSTANT:
-            rank = 64
+            rank = max(64, predict_rank(ans_tok))
             for attempt in range(MAX_ADAPTIVE_RETRIES):
                 ad = AdapterExpert(hidden, rank).to(DEVICE)
                 t0 = time.time()
@@ -1316,7 +1419,7 @@ def main():
                     model, ad, tokenize_qa(tok, qa),
                     epochs=max(40, TRAIN_EPOCHS), lr=INSTANT_LR, batch=BATCH, device=DEVICE,
                 )
-                acc = probe_hit_rate(model, tok, probes, answer, "knowledge", topic, None, adapter=ad)
+                acc = probe_gated(model, tok, probes, answer, "knowledge", topic, None, adapter=ad, threshold=0.34)
                 dt = time.time() - t0
                 print(f"  instant attempt {attempt+1}: rank={rank} loss={loss:.4f} probe={acc:.0%} ({dt:.2f}s)")
                 if acc >= 0.34 or (loss < 1.5 and acc > 0):
@@ -1350,7 +1453,7 @@ def main():
             masks, used = allocate_free(register, n_layers, inter, n, eid, DEVICE)
             t0 = time.time()
             loss = train_expert(model, tok, qa, masks, gov, register, DEVICE, epochs=max(40, TRAIN_EPOCHS))
-            acc = probe_hit_rate(model, tok, probes, answer, "knowledge", topic, masks)
+            acc = probe_gated(model, tok, probes, answer, "knowledge", topic, masks, threshold=0.34)
             # title-surface bonus: if generation mentions the topic title, routing works
             if acc < 0.34 and topic:
                 acc = max(acc, probe_hit_rate(
@@ -1575,15 +1678,36 @@ def main():
                     except Exception:
                         pass
                 if route.intent == "unknown":
-                    matched = eid is not None and (
-                        top1 >= 0.75
-                        or (
-                            looks_q
-                            and ekind == "knowledge"
-                            and eid in knowledge_eids
-                            and len(knowledge_eids) == 1
-                            and top1 >= 0.35
+                    sole_k = (
+                        looks_q
+                        and ekind == "knowledge"
+                        and eid in knowledge_eids
+                        and len(knowledge_eids) == 1
+                        and top1 >= 0.35
+                    )
+                    # 0.35-0.74 cosine between two generic "what is…" questions
+                    # is NOT topical: require shared topic words or a genuine
+                    # follow-up pronoun, else refuse (blood type ≠ aurora station)
+                    if sole_k:
+                        ent = next(
+                            (e for e in input_router.experts
+                             if e["expert_id"] == eid),
+                            None,
                         )
+                        title = str(
+                            (ent or {}).get("title")
+                            or (ent or {}).get("value") or ""
+                        ).lower()
+                        tt = set(re.findall(r"[a-z0-9]{3,}", title))
+                        qt = set(re.findall(r"[a-z0-9]{3,}", text.lower()))
+                        cont = bool(re.search(
+                            r"\b(it|its|they|them|this|that|game|series|does|do|"
+                            r"has|have|was|were|about|there|multiplayer|camera|"
+                            r"engine|plot|story|release)\b", text.lower(),
+                        ))
+                        sole_k = bool(tt & qt) or cont
+                    matched = eid is not None and (
+                        top1 >= 0.75 or sole_k
                     )
                 else:
                     matched = (

@@ -33,6 +33,27 @@ def next_rank(r: int) -> int:
     return RANK_GRID[-1]
 
 
+def predict_rank(ans_tok: int) -> int:
+    """Start rank for a given answer length — the adapter capacity law.
+
+    Measured on RTX 4070 at TRAIN_EPOCHS=30, lr=1e-2 (sweeps in
+    results_adapter_capacity/sweep_*.json): min passing rank was 16 for <=40-token answers,
+    32 for ~50-60, 64 for ~76, 256 for 150-228 (no fact up to 228 tokens
+    needed more than 256; >~240 tokens hits the MAX_LEN=256 truncation
+    wall instead). Overshooting one grid step costs ~65k params;
+    undershooting costs a full retry attempt (~2-7s), so err high.
+    """
+    if ans_tok <= 40:
+        return 16
+    if ans_tok <= 70:
+        return 32
+    if ans_tok <= 110:
+        return 64
+    if ans_tok <= 140:
+        return 128
+    return 256
+
+
 class AdapterExpert(nn.Module):
     """Residual bottleneck on hidden state. fp32 params, bf16 I/O."""
 

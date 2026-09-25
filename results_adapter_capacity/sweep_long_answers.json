@@ -1,0 +1,32 @@
+[
+  {
+    "ans_tok": 14,
+    "base": 0.0,
+    "value": "the quarterly review deck is due the second friday of each m",
+    "min_rank": 16
+  },
+  {
+    "ans_tok": 20,
+    "base": 0.0,
+    "value": "warehouse bay 12 is reserved for cold-chain shipments until ",
+    "min_rank": 16
+  },
+  {
+    "ans_tok": 17,
+    "base": 0.0,
+    "value": "remember to rotate the api gateway credentials every quarter",
+    "min_rank": 16
+  },
+  {
+    "ans_tok": 25,
+    "base": 0.0,
+    "value": "the offline replica lives in the frankfurt region and must b",
+    "min_rank": 16
+  },
+  {
+    "ans_tok": 23,
+    "base": 0.0,
+    "value": "every pull request touching the ingestion pipeline requires ",
+    "min_rank": 16
+  }
+]

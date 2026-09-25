@@ -1,0 +1,20 @@
+[
+  {
+    "ans_tok": 52,
+    "base": 0.0,
+    "value": "the customer escalation channel answers only to severity one incidents",
+    "min_rank": 16
+  },
+  {
+    "ans_tok": 56,
+    "base": 0.0,
+    "value": "remember that the frankfurt replica must be promoted manually during a",
+    "min_rank": 16
+  },
+  {
+    "ans_tok": 66,
+    "base": 0.0,
+    "value": "the quarterly review deck is due the second friday of each month and m",
+    "min_rank": null
+  }
+]

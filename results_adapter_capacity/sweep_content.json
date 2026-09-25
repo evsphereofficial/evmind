@@ -1,0 +1,30 @@
+[
+  {
+    "name": "1-sentence",
+    "ans_tok": 16,
+    "base": 1.0,
+    "sentences": 1,
+    "min_rank": "base-knows"
+  },
+  {
+    "name": "3-sentence",
+    "ans_tok": 15,
+    "base": 1.0,
+    "sentences": 3,
+    "min_rank": "base-knows"
+  },
+  {
+    "name": "6-sentence",
+    "ans_tok": 16,
+    "base": 1.0,
+    "sentences": 6,
+    "min_rank": "base-knows"
+  },
+  {
+    "name": "10-sentence",
+    "ans_tok": 15,
+    "base": 1.0,
+    "sentences": 10,
+    "min_rank": "base-knows"
+  }
+]

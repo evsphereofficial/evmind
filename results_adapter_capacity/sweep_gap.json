@@ -1,0 +1,22 @@
+[
+  {
+    "ans_tok": 32,
+    "trunc": 0,
+    "min_rank": 16
+  },
+  {
+    "ans_tok": 48,
+    "trunc": 0,
+    "min_rank": 32
+  },
+  {
+    "ans_tok": 60,
+    "trunc": 0,
+    "min_rank": 32
+  },
+  {
+    "ans_tok": 76,
+    "trunc": 0,
+    "min_rank": 16
+  }
+]
