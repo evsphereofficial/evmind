@@ -47,3 +47,7 @@
 {"state": {"known_memory": "none", "user_message": "By the way my favorite color is teal"}, "gold": {"action": "learn", "fact_kind": "knowledge"}, "topics": []}
 {"state": {"known_memory": "resident evil requiem: horror game", "user_message": "is it any good?"}, "gold": {"action": "answer_from_memory", "fact_kind": "none", "topic": "resident evil requiem"}, "topics": ["resident evil requiem"]}
 {"state": {"known_memory": "none", "user_message": "is it any good?"}, "gold": {"action": "admit_ignorance", "fact_kind": "none"}, "topics": []}
+{"state": {"known_memory": "country: India", "user_message": "Where am I from?"}, "gold": {"action": "answer_from_memory", "fact_kind": "none", "topic": "country"}, "topics": ["country"]}
+{"state": {"known_memory": "boss: Dax; office code: ZEBRA-42", "user_message": "Where am I from?"}, "gold": {"action": "admit_ignorance", "fact_kind": "none", "topic": "about_something_else"}, "topics": ["boss", "office code"]}
+{"state": {"known_memory": "boss: Dax", "user_message": "I am from Germany"}, "gold": {"action": "learn", "fact_kind": "knowledge", "topic": "about_something_else"}, "topics": ["boss"]}
+{"state": {"known_memory": "country: India", "user_message": "What's my country again?"}, "gold": {"action": "answer_from_memory", "fact_kind": "none", "topic": "country"}, "topics": ["country"]}

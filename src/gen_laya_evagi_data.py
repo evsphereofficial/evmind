@@ -36,6 +36,7 @@ AURORA = (
     "aurora station project: reactor core named ZEBRA-42, lead engineer Kira",
     ["aurora station project"],
 )
+COUNTRY = ("country: India", ["country"])
 MIXED = (
     "boss: Dax; blood type: O+; resident evil requiem: survival horror game by capcom",
     ["boss", "blood type", "resident evil requiem"],
@@ -54,12 +55,13 @@ AURORA_S = ("aurora station project: core named ZEBRA-42", ["aurora station proj
 AURORA_S2 = ("aurora station project: core ZEBRA-42", ["aurora station project"])
 COFFEE_S = ("how to make coffee: 18g beans, 300ml water", ["how to make coffee"])
 ALL_CTX = [NONE, BOSS, BLOOD, REQUIEM, REQUIEM_S, COFFEE, COFFEE_S, OFFICE,
-           AURORA, AURORA_S, AURORA_S2, MIXED, MIXED2, MIXED3]
+           AURORA, AURORA_S, AURORA_S2, COUNTRY, MIXED, MIXED2, MIXED3]
 
 NAMES = ["Rehan", "Alice", "Dax", "Meera", "Kira", "Sofia", "Jonas", "Priya"]
 DATES = ["March 3rd", "July 12th 1996", "the 4th of July", "September 1st", "December 24th"]
 COLORS = ["blue", "teal", "crimson", "forest green", "amber"]
 CITIES = ["Lisbon", "Karachi", "Oslo", "Kyoto", "Vancouver"]
+COUNTRIES = ["India", "Pakistan", "Germany", "Brazil", "Turkey"]
 PWS = ["xyz123", "NEBULA-77", "starlight99", "blue-moon-42"]
 BLOODS = ["O+", "B-", "A+", "AB-"]
 CODES = ["ZEBRA-42", "B-212", "QX-991", "KAPPA-9"]
@@ -85,9 +87,11 @@ def personal_learns() -> list[tuple]:
         "my office code is {code}", "my locker code is {code}",
         "my car is {car}",
         "my favourite movie is {m}",
+        "i am from {ctry}", "i'm from {ctry}",
     ]
     fill = {"n": NAMES, "d": DATES, "c": COLORS, "p": ["Mochi", "Biscuit", "Luna"],
-            "city": CITIES, "pw": PWS, "bt": BLOODS, "code": CODES, "car": CARS, "m": MOVIES}
+            "city": CITIES, "pw": PWS, "bt": BLOODS, "code": CODES, "car": CARS, "m": MOVIES,
+            "ctry": COUNTRIES}
     for f in frames:
         for _ in range(9):
             text = f.format(**{k: RNG.choice(v) for k, v in fill.items()})
@@ -97,6 +101,7 @@ def personal_learns() -> list[tuple]:
         "by the way my boss is {n}", "i forgot to mention i live in {city}",
         "just so you know my wifi password is {pw}", "one more thing my first name is {n}",
         "wait no, my office code is {code}", "correction, my blood type is {bt}",
+        "oh also i am from {ctry}",
     ]
     for f in follow:
         for _ in range(8):
@@ -211,9 +216,12 @@ def memory_queries() -> list[tuple]:
         "city": ["which city do i live in?", "what city am i in?"],
         "office code": ["what's the office code again?", "what is my office code?",
                         "remind me of the office code", "what was the office code?"],
+        "country": ["where am i from?", "which country am i from?",
+                    "where do i come from?", "do you remember which country i'm from?",
+                    "what's my country again?"],
     }
     ctx_map = {"boss": BOSS, "blood type": BLOOD, "first name": MIXED2,
-               "city": MIXED2, "office code": OFFICE}
+               "city": MIXED2, "office code": OFFICE, "country": COUNTRY}
     for field, qs in personal.items():
         ctx, topics = ctx_map[field]
         topic = field if field in topics else (topics[0] if topics else NO_TOPIC)
@@ -288,6 +296,8 @@ def admit_ignorance() -> list[tuple]:
         ("what's my PIN?", "PIN"),
         ("remind me of my locker code", "locker code"),
         ("do you know my boss's name?", "boss name"),
+        ("where am I from?", "country"),
+        ("which country am I from?", "country"),
     ]
     unrelated = [NONE, BOSS, BLOOD, REQUIEM, MIXED, MIXED3, COFFEE, OFFICE]
     for text, tgt in hijack:
@@ -535,6 +545,12 @@ def tricky_battery() -> list[dict]:
         ("is it any good?", "resident evil requiem: horror game",
          ["resident evil requiem"], "answer_from_memory"),
         ("is it any good?", "none", [], "admit_ignorance"),
+        ("Where am I from?", "country: India", ["country"], "answer_from_memory"),
+        ("Where am I from?", "boss: Dax; office code: ZEBRA-42",
+         ["boss", "office code"], "admit_ignorance"),
+        ("I am from Germany", "boss: Dax", ["boss"], "learn"),
+        ("What's my country again?", "country: India", ["country"],
+         "answer_from_memory"),
     ]
     # explicit topic golds: text -> expected topic when present in ctx
     topic_gold = {
@@ -554,6 +570,8 @@ def tricky_battery() -> list[dict]:
         "What's my office code?": "office code",
         "Who leads the aurora project?": "aurora station project",
         "Does it have a reactor core?": "aurora station project",
+        "Where am I from?": "country",
+        "What's my country again?": "country",
     }
     rows = []
     for text, mem, topics, action in cases:
